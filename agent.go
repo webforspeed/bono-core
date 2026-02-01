@@ -3,13 +3,15 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 // Agent orchestrates conversations with an LLM and executes tools.
 type Agent struct {
-	config Config
-	client *Client
-	msgs   []Message
+	config       Config
+	client       *Client
+	msgs         []Message
+	preTasksDone bool // tracks if pre-tasks have executed
 
 	// Optional hooks - nil means default behavior (auto-execute, no output)
 
@@ -23,6 +25,12 @@ type Agent struct {
 
 	// OnMessage is called when the assistant responds with text content.
 	OnMessage func(content string)
+
+	// OnPreTaskStart is called when a pre-task begins.
+	OnPreTaskStart func(name string)
+
+	// OnPreTaskEnd is called when a pre-task completes.
+	OnPreTaskEnd func(name string)
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -46,7 +54,16 @@ func NewAgent(config Config) (*Agent, error) {
 // Chat sends a user message and processes the complete turn.
 // Blocks until the assistant provides a final text response.
 // Tool calls are executed automatically unless OnToolCall returns false.
+// On the first call, pre-tasks are automatically executed if configured.
 func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
+	// Auto-run pre-tasks on first call
+	if !a.preTasksDone && len(a.config.PreTasks) > 0 {
+		if err := a.runPreTasks(ctx); err != nil {
+			return "", err
+		}
+		a.preTasksDone = true
+	}
+
 	a.msgs = append(a.msgs, Message{Role: "user", Content: input})
 
 	for {
@@ -113,4 +130,86 @@ func (a *Agent) Reset() {
 	if a.config.SystemPrompt != "" {
 		a.msgs = append(a.msgs, Message{Role: "system", Content: a.config.SystemPrompt})
 	}
+}
+
+// runPreTasks executes all configured pre-tasks before the main agent loop.
+// Each pre-task runs with its own isolated message history.
+func (a *Agent) runPreTasks(ctx context.Context) error {
+	for _, task := range a.config.PreTasks {
+		if a.OnPreTaskStart != nil {
+			a.OnPreTaskStart(task.Name)
+		}
+
+		// Create isolated message history for this pre-task
+		taskMsgs := []Message{{Role: "system", Content: task.SystemPrompt}}
+		input := task.Input
+		if input == "" {
+			input = "Begin"
+		}
+		taskMsgs = append(taskMsgs, Message{Role: "user", Content: input})
+
+		// Run task loop until DoneMarker detected
+		for {
+			msg, err := a.client.ChatCompletion(ctx, taskMsgs)
+			if err != nil {
+				return err
+			}
+			taskMsgs = append(taskMsgs, *msg)
+
+			// Check for completion (no tool calls and contains done marker)
+			if len(msg.ToolCalls) == 0 {
+				if content, ok := msg.Content.(string); ok {
+					if a.OnMessage != nil && content != "" {
+						a.OnMessage(content)
+					}
+					if strings.Contains(content, task.DoneMarker) {
+						break
+					}
+				}
+				continue
+			}
+
+			// Track checkpoint for potential cancellation rollback
+			checkpoint := len(taskMsgs) - 1
+			cancelled := false
+
+			// Execute tools (using existing hooks)
+			for _, tc := range msg.ToolCalls {
+				var args map[string]any
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+
+				// Check if tool should execute
+				if a.OnToolCall != nil && !a.OnToolCall(tc.Function.Name, args) {
+					cancelled = true
+					break
+				}
+
+				result := ExecuteTool(tc.Function.Name, args)
+
+				if a.OnToolDone != nil {
+					a.OnToolDone(tc.Function.Name, args, result)
+				}
+
+				taskMsgs = append(taskMsgs, Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    result.Output,
+				})
+			}
+
+			// If cancelled, rollback and skip remaining pre-tasks
+			if cancelled {
+				taskMsgs = taskMsgs[:checkpoint]
+				if a.OnPreTaskEnd != nil {
+					a.OnPreTaskEnd(task.Name)
+				}
+				return ErrToolCancelled
+			}
+		}
+
+		if a.OnPreTaskEnd != nil {
+			a.OnPreTaskEnd(task.Name)
+		}
+	}
+	return nil
 }
