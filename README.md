@@ -12,8 +12,10 @@ General-purpose autonomous agent core and API client for building CLIs, TUIs, HT
 - [ ] Agent config files (AGENT.md, CLAUDE.md)
 - [ ] Skills system (prompt/tool bundles)
 - [ ] MCP tool integrations
-- [ ] Custom slash(/) commands
-- [ ] Plan mode
+- [ ] Slash commands (built-in + user-defined)
+- [ ] Plan mode (preview and approve steps before execution)
+- [ ] Sub-agents (delegate subtasks to child agents)
+- [ ] Parallel tool execution (concurrent tool calls)
 
 ## Installation
 
