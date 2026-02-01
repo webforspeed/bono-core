@@ -165,6 +165,8 @@ What makes this different from other open source agents:
 
 - **Transparent tool calls**: Every tool includes a plain-English description and a required `safety` classification (`read-only`, `modify`, `destructive`, `network`, `privileged`). You always know what the agent is about to do before approving.
 
+- **Self-correcting**: The agent is eager to verify its work and validate after every mutation—commands, file changes, or tasks. This feedback loop lets it catch mistakes early and keep iterating until the goal is actually complete.
+
 ## Dependencies
 
 This package has **zero external dependencies** - only Go standard library.
