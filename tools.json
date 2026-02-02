@@ -1,0 +1,100 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Reads and returns the full contents of a file at the specified path. Use this tool to examine file contents before making edits or to understand existing code. Returns the raw text content. Will fail if the file does not exist or cannot be read. Always read a file before attempting to edit it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path to the file to read, e.g. 'src/main.go' or './config.json'"
+          }
+        },
+        "required": ["path"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_file",
+      "description": "Creates a new file or completely overwrites an existing file with the provided content. Use this only when creating new files or replacing entire file contents. For partial modifications, use edit_file instead. Parent directories must already exist or the operation will fail. File is written with 0644 permissions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path where the file should be written. Parent directories must exist."
+          },
+          "content": {
+            "type": "string",
+            "description": "The complete text content to write. This replaces any existing content entirely."
+          }
+        },
+        "required": ["path", "content"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_shell",
+      "description": "Executes a shell command via a specialized subagent. The subagent runs the command, analyzes output per your system_prompt instructions, and returns only relevant information. This keeps verbose command output out of main context. The subagent can run follow-up commands if needed to complete its task. Use for any CLI operation: build commands, git operations, package managers, file exploration. Always end system_prompt with: 'Output {{SHELL_DONE}} followed by your response.'",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The initial shell command to execute, e.g. 'git log --oneline -20' or 'find . -name \"*.go\"'"
+          },
+          "description": {
+            "type": "string",
+            "description": "A brief human-readable description of what this command accomplishes, for logging and review purposes"
+          },
+          "safety": {
+            "type": "string",
+            "enum": ["read-only", "modify", "destructive", "network", "privileged"],
+            "description": "Safety classification. 'read-only': no side effects (ls, cat, grep). 'modify': reversible changes (git add, touch). 'destructive': irreversible (rm -rf). 'network': external requests (curl, git push). 'privileged': requires sudo."
+          },
+          "system_prompt": {
+            "type": "string",
+            "description": "Instructions for the shell subagent that will execute and analyze the command output. Must specify: (1) the subagent's role/identity, (2) what specific information to extract or verify from the output, (3) what to ignore or filter out, (4) the exact format for the response. Be precise - the subagent returns only what you ask for. End your instructions with: 'Output {{SHELL_DONE}} followed by your response.'"
+          }
+        },
+        "required": ["command", "description", "safety", "system_prompt"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_file",
+      "description": "Performs a search-and-replace operation in a file. Use this for making targeted changes to existing files. The old_string must match exactly including all whitespace and newlines. Fails if old_string is not found. Fails if old_string matches multiple times unless replace_all is true. Always use read_file first to see the exact text you need to match.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path to the file to edit"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "The exact text to find and replace. Must match character-for-character including whitespace and newlines."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "The replacement text. Can be empty string to delete the matched text."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, replaces all occurrences. If false (default), fails when multiple matches exist."
+          }
+        },
+        "required": ["path", "old_string", "new_string"]
+      }
+    }
+  }
+]

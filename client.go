@@ -27,11 +27,18 @@ func NewClient(config Config) (*Client, error) {
 }
 
 // ChatCompletion sends messages to the API and returns the assistant's response.
+// Uses the tools configured in the client.
 func (c *Client) ChatCompletion(ctx context.Context, messages []Message) (*Message, error) {
+	return c.ChatCompletionWithTools(ctx, messages, c.config.Tools)
+}
+
+// ChatCompletionWithTools sends messages with a custom tool set.
+// Use this when you need to override the default tools (e.g., for subagents).
+func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
 	req := ChatRequest{
 		Model:    c.config.Model,
 		Messages: messages,
-		Tools:    c.config.Tools,
+		Tools:    tools,
 	}
 
 	body, err := json.Marshal(req)
