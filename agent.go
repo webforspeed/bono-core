@@ -118,8 +118,10 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 			var result ToolResult
 			if tc.Function.Name == "run_shell" {
 				cmd, _ := args["command"].(string)
+				desc, _ := args["description"].(string)
+				safety, _ := args["safety"].(string)
 				sysPrompt, _ := args["system_prompt"].(string)
-				result = a.ExecuteShellSubagent(ctx, cmd, sysPrompt)
+				result = a.ExecuteShellSubagent(ctx, cmd, desc, safety, sysPrompt)
 			} else {
 				result = ExecuteTool(tc.Function.Name, args)
 			}
@@ -178,14 +180,15 @@ var SubagentShellTool = []Tool{{
 
 // ExecuteShellSubagent runs a command via a subagent with custom system prompt.
 // The subagent can run follow-up commands and returns summarized output.
-func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, systemPrompt string) ToolResult {
+func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, safety, systemPrompt string) ToolResult {
 	// Notify start with system prompt
 	if a.OnShellSubagentStart != nil {
 		a.OnShellSubagentStart(systemPrompt)
 	}
 
 	// 1. Check if initial command should execute via hook
-	initialArgs := map[string]any{"command": command}
+	// Include description and safety from parent call for display
+	initialArgs := map[string]any{"command": command, "description": description, "safety": safety}
 	if a.OnSubagentToolCall != nil && !a.OnSubagentToolCall("run_shell", initialArgs) {
 		cancelledResult := ToolResult{Success: false, Output: "cancelled by user", Status: "cancelled"}
 		if a.OnShellSubagentEnd != nil {
@@ -329,8 +332,10 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 				var result ToolResult
 				if tc.Function.Name == "run_shell" {
 					cmd, _ := args["command"].(string)
+					desc, _ := args["description"].(string)
+					safety, _ := args["safety"].(string)
 					sysPrompt, _ := args["system_prompt"].(string)
-					result = a.ExecuteShellSubagent(ctx, cmd, sysPrompt)
+					result = a.ExecuteShellSubagent(ctx, cmd, desc, safety, sysPrompt)
 				} else {
 					result = ExecuteTool(tc.Function.Name, args)
 				}
