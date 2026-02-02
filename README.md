@@ -103,6 +103,14 @@ core.PreTaskConfig{
 }
 ```
 
+## Sub-agents
+
+Sub-agents are specialized agents that can be delegated specific tasks. They run with their own context and system prompts, allowing the main agent to offload work without polluting its own context window.
+
+| Sub-agent | Description |
+|-----------|-------------|
+| Explore | Analyzes the codebase and generates an `AGENT.md` file with project structure, conventions, and patterns |
+
 ## Built-in Tools
 
 The package includes execution functions for common tools:
