@@ -54,8 +54,16 @@ type Choice struct {
 
 // ToolResult contains the outcome of a tool execution.
 type ToolResult struct {
-	Success bool   // Whether the tool executed successfully
-	Output  string // Result content to send back to API
-	Status  string // Human-readable status for display
-	Error   error  // Error if execution failed
+	Success  bool      // Whether the tool executed successfully
+	Output   string    // Result content to send back to API
+	Status   string    // Human-readable status for display
+	Error    error     // Error if execution failed
+	ExecMeta *ExecMeta // Execution metadata (non-nil for shell tools)
+}
+
+// ExecMeta contains metadata about shell command execution.
+type ExecMeta struct {
+	Sandboxed     bool   // true if command ran inside sandbox
+	SandboxError  bool   // true if sandbox blocked execution
+	SandboxReason string // reason if sandbox blocked (e.g., "write outside cwd")
 }

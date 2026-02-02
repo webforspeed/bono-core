@@ -3,9 +3,7 @@ package core
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
-	"time"
 )
 
 // ExecuteReadFile reads a file and returns its contents.
@@ -93,26 +91,18 @@ func ExecuteEditFile(path, oldStr, newStr string, replaceAll bool) ToolResult {
 	}
 }
 
-// ExecuteShell runs a shell command and returns output.
+// ExecuteShell runs a shell command using the configured executor (sandboxed or passthrough).
 func ExecuteShell(command string) ToolResult {
-	start := time.Now()
-	out, err := exec.Command("sh", "-c", command).CombinedOutput()
-	elapsed := time.Since(start).Seconds()
+	result, _ := GetExecutor().Run(command)
+	return result
+}
 
-	if err != nil {
-		return ToolResult{
-			Success: false,
-			Output:  string(out),
-			Error:   err,
-			Status:  fmt.Sprintf("fail (%.1fs)", elapsed),
-		}
-	}
-
-	return ToolResult{
-		Success: true,
-		Output:  string(out),
-		Status:  fmt.Sprintf("ok (%.1fs)", elapsed),
-	}
+// ExecuteShellUnsandboxed runs a shell command directly without sandboxing.
+// Used for fallback when sandbox blocks a command and user approves unsandboxed execution.
+func ExecuteShellUnsandboxed(command string) ToolResult {
+	passthrough := &PassthroughExecutor{}
+	result, _ := passthrough.Run(command)
+	return result
 }
 
 // ExecuteTool dispatches to the appropriate tool function.
@@ -144,6 +134,13 @@ func ExecuteTool(name string, args map[string]any) ToolResult {
 }
 
 // RequiresConfirmation returns true if the tool should prompt user before executing.
-func RequiresConfirmation(name string) bool {
-	return name != "read_file"
+// When sandboxed is true and sandbox is enabled, shell commands don't require confirmation.
+func RequiresConfirmation(name string, sandboxed bool) bool {
+	if name == "read_file" {
+		return false
+	}
+	if name == "run_shell" && sandboxed && IsSandboxEnabled() {
+		return false // sandboxed shell commands don't need approval
+	}
+	return true
 }

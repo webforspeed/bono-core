@@ -41,12 +41,18 @@ type Agent struct {
 	OnShellSubagentEnd func(result ToolResult)
 
 	// OnSubagentToolCall is called before a subagent executes a tool.
-	// Return false to skip tool execution (sends "cancelled by user" as result).
-	OnSubagentToolCall func(name string, args map[string]any) bool
+	// Returns (shouldExecute, useSandbox). If shouldExecute is false, tool is cancelled.
+	// If useSandbox is true, command runs in sandbox (no approval needed if sandbox succeeds).
+	// The meta parameter contains sandbox info if this is a pre-execution check.
+	OnSubagentToolCall func(name string, args map[string]any, meta *ExecMeta) bool
 
 	// OnSubagentToolDone is called after a subagent tool executes.
 	// Receives the tool name, args (for display), and result.
 	OnSubagentToolDone func(name string, args map[string]any, result ToolResult)
+
+	// OnSandboxFallback is called when sandbox blocks a command.
+	// Return true to execute outside sandbox (requires approval), false to cancel.
+	OnSandboxFallback func(command string, reason string) bool
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -59,6 +65,14 @@ func NewAgent(config Config) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize sandbox with config or defaults
+	sandboxCfg := config.Sandbox
+	if sandboxCfg.ReadPaths == nil && sandboxCfg.WritePaths == nil && sandboxCfg.ExecPaths == nil {
+		// No sandbox config provided, use defaults
+		sandboxCfg = DefaultSandboxConfig()
+	}
+	InitSandbox(sandboxCfg)
 
 	a := &Agent{config: config, client: client}
 	if config.SystemPrompt != "" {
@@ -180,38 +194,35 @@ var SubagentShellTool = []Tool{{
 
 // ExecuteShellSubagent runs a command via a subagent with custom system prompt.
 // The subagent can run follow-up commands and returns summarized output.
+// Commands are executed in sandbox when available, with fallback to approval-based unsandboxed execution.
 func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, safety, systemPrompt string) ToolResult {
 	// Notify start with system prompt
 	if a.OnShellSubagentStart != nil {
 		a.OnShellSubagentStart(systemPrompt)
 	}
 
-	// 1. Check if initial command should execute via hook
-	// Include description and safety from parent call for display
+	// 1. Execute initial command with sandbox support
 	initialArgs := map[string]any{"command": command, "description": description, "safety": safety}
-	if a.OnSubagentToolCall != nil && !a.OnSubagentToolCall("run_shell", initialArgs) {
-		cancelledResult := ToolResult{Success: false, Output: "cancelled by user", Status: "cancelled"}
+	result := a.executeShellWithSandbox(command, initialArgs)
+	if result.Output == "cancelled by user" {
 		if a.OnShellSubagentEnd != nil {
-			a.OnShellSubagentEnd(cancelledResult)
+			a.OnShellSubagentEnd(result)
 		}
-		return cancelledResult
+		return result
 	}
-
-	// 2. Run initial command using existing ExecuteShell
-	result := ExecuteShell(command)
 
 	// Notify initial command done
 	if a.OnSubagentToolDone != nil {
 		a.OnSubagentToolDone("run_shell", initialArgs, result)
 	}
 
-	// 3. Create isolated subagent message history
+	// 2. Create isolated subagent message history
 	msgs := []Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: "Command: " + command + "\n\nOutput:\n" + result.Output},
 	}
 
-	// 4. Subagent loop with shell-only tools
+	// 3. Subagent loop with shell-only tools
 	for {
 		msg, err := a.client.ChatCompletionWithTools(ctx, msgs, SubagentShellTool)
 		if err != nil {
@@ -249,9 +260,9 @@ func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, 
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			cmd, _ := args["command"].(string)
 
-			// Check if follow-up command should execute via hook
-			if a.OnSubagentToolCall != nil && !a.OnSubagentToolCall("run_shell", args) {
-				// User cancelled - send cancelled result to LLM and continue
+			// Execute with sandbox support
+			toolResult := a.executeShellWithSandbox(cmd, args)
+			if toolResult.Output == "cancelled by user" {
 				msgs = append(msgs, Message{
 					Role:       "tool",
 					ToolCallID: tc.ID,
@@ -259,8 +270,6 @@ func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, 
 				})
 				continue
 			}
-
-			toolResult := ExecuteShell(cmd)
 
 			// Notify follow-up command done
 			if a.OnSubagentToolDone != nil {
@@ -274,6 +283,59 @@ func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, 
 			})
 		}
 	}
+}
+
+// executeShellWithSandbox executes a shell command with sandbox support and fallback.
+// If sandbox is enabled, tries sandboxed execution first.
+// If sandbox blocks, requests fallback approval via OnSandboxFallback hook.
+// If sandbox is disabled or unavailable, requests approval via OnSubagentToolCall hook.
+func (a *Agent) executeShellWithSandbox(command string, args map[string]any) ToolResult {
+	sandboxEnabled := IsSandboxEnabled()
+
+	if sandboxEnabled {
+		// Try sandboxed execution first
+		result := ExecuteShell(command)
+
+		// Check if sandbox blocked the command
+		if result.ExecMeta != nil && result.ExecMeta.SandboxError {
+			// Sandbox blocked - check if fallback is enabled
+			if a.config.Sandbox.FallbackOutsideSandbox || DefaultSandboxConfig().FallbackOutsideSandbox {
+				// Request approval for unsandboxed execution
+				if a.OnSandboxFallback != nil {
+					reason := result.ExecMeta.SandboxReason
+					if !a.OnSandboxFallback(command, reason) {
+						return ToolResult{Success: false, Output: "cancelled by user", Status: "cancelled"}
+					}
+					// User approved fallback - run unsandboxed
+					return ExecuteShellUnsandboxed(command)
+				}
+			}
+			// Fallback not enabled or no hook - return sandbox error
+			return result
+		}
+
+		// Sandbox execution succeeded (or command failed for non-sandbox reasons)
+		// Notify hook for display purposes (sandboxed execution doesn't need prior approval)
+		if a.OnSubagentToolCall != nil {
+			meta := result.ExecMeta
+			if meta == nil {
+				meta = &ExecMeta{Sandboxed: true}
+			}
+			// This is a notification-only call for sandboxed execution
+			a.OnSubagentToolCall("run_shell", args, meta)
+		}
+		return result
+	}
+
+	// Sandbox not enabled - require approval before execution
+	if a.OnSubagentToolCall != nil {
+		meta := &ExecMeta{Sandboxed: false}
+		if !a.OnSubagentToolCall("run_shell", args, meta) {
+			return ToolResult{Success: false, Output: "cancelled by user", Status: "cancelled"}
+		}
+	}
+
+	return ExecuteShellUnsandboxed(command)
 }
 
 // runPreTasks executes all configured pre-tasks before the main agent loop.

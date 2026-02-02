@@ -20,6 +20,9 @@ var (
 
 	// ErrMultipleMatches is returned when multiple matches are found without replace_all.
 	ErrMultipleMatches = errors.New("multiple matches found, use replace_all")
+
+	// ErrSandboxBlocked is returned when sandbox policy blocks command execution.
+	ErrSandboxBlocked = errors.New("command blocked by sandbox policy")
 )
 
 // APIError represents an error from the chat API.
