@@ -166,96 +166,108 @@ func (a *Agent) Reset() {
 	}
 }
 
+// RunPreTask executes a single pre-task immediately without affecting pre-task auto-run state.
+func (a *Agent) RunPreTask(ctx context.Context, task PreTaskConfig) error {
+	return a.runPreTask(ctx, task)
+}
+
 // runPreTasks executes all configured pre-tasks before the main agent loop.
 // Each pre-task runs with its own isolated message history.
 func (a *Agent) runPreTasks(ctx context.Context) error {
 	for _, task := range a.config.PreTasks {
-		if a.OnPreTaskStart != nil {
-			a.OnPreTaskStart(task.Name)
+		if err := a.runPreTask(ctx, task); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
+	if a.OnPreTaskStart != nil {
+		a.OnPreTaskStart(task.Name)
+	}
+
+	// Create isolated message history for this pre-task
+	taskMsgs := []Message{{Role: "system", Content: task.SystemPrompt}}
+	input := task.Input
+	if input == "" {
+		input = "Begin"
+	}
+	taskMsgs = append(taskMsgs, Message{Role: "user", Content: input})
+
+	// Run task loop until DoneMarker detected
+	for turns := 0; ; turns++ {
+		if turns >= maxPreTaskTurns {
+			return fmt.Errorf("pretask %s: %w", task.Name, ErrMaxTurnsExceeded)
+		}
+		msg, err := a.client.ChatCompletion(ctx, taskMsgs)
+		if err != nil {
+			return err
+		}
+		taskMsgs = append(taskMsgs, *msg)
+		content := messageContent(msg)
+		if a.OnMessage != nil && strings.TrimSpace(content) != "" {
+			a.OnMessage(content)
 		}
 
-		// Create isolated message history for this pre-task
-		taskMsgs := []Message{{Role: "system", Content: task.SystemPrompt}}
-		input := task.Input
-		if input == "" {
-			input = "Begin"
+		// Check for completion (no tool calls)
+		if len(msg.ToolCalls) == 0 {
+			if content == "" {
+				return fmt.Errorf("pretask %s: %w", task.Name, ErrEmptyResponse)
+			}
+			break
 		}
-		taskMsgs = append(taskMsgs, Message{Role: "user", Content: input})
 
-		// Run task loop until DoneMarker detected
-		for turns := 0; ; turns++ {
-			if turns >= maxPreTaskTurns {
-				return fmt.Errorf("pretask %s: %w", task.Name, ErrMaxTurnsExceeded)
-			}
-			msg, err := a.client.ChatCompletion(ctx, taskMsgs)
-			if err != nil {
-				return err
-			}
-			taskMsgs = append(taskMsgs, *msg)
-			content := messageContent(msg)
-			if a.OnMessage != nil && strings.TrimSpace(content) != "" {
-				a.OnMessage(content)
-			}
+		// Execute tools and collect results
+		var toolResults []Message
+		cancelled := false
 
-			// Check for completion (no tool calls)
-			if len(msg.ToolCalls) == 0 {
-				if content == "" {
-					return fmt.Errorf("pretask %s: %w", task.Name, ErrEmptyResponse)
-				}
+		for _, tc := range msg.ToolCalls {
+			var args map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+
+			// Check if tool should execute
+			if a.OnToolCall != nil && !a.OnToolCall(tc.Function.Name, args) {
+				cancelled = true
 				break
 			}
 
-			// Execute tools and collect results
-			var toolResults []Message
-			cancelled := false
-
-			for _, tc := range msg.ToolCalls {
-				var args map[string]any
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-
-				// Check if tool should execute
-				if a.OnToolCall != nil && !a.OnToolCall(tc.Function.Name, args) {
-					cancelled = true
-					break
-				}
-
-				// Execute tool with sandbox support for shell
-				var result ToolResult
-				if tc.Function.Name == "run_shell" {
-					cmd, _ := args["command"].(string)
-					result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
-				} else {
-					result = ExecuteTool(tc.Function.Name, args)
-				}
-
-				if a.OnToolDone != nil {
-					a.OnToolDone(tc.Function.Name, args, result)
-				}
-
-				// Append tool result message
-				toolResults = append(toolResults, Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    result.Output,
-				})
+			// Execute tool with sandbox support for shell
+			var result ToolResult
+			if tc.Function.Name == "run_shell" {
+				cmd, _ := args["command"].(string)
+				result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
+			} else {
+				result = ExecuteTool(tc.Function.Name, args)
 			}
 
-			// If cancelled, rollback and skip remaining pre-tasks
-			if cancelled {
-				taskMsgs = taskMsgs[:len(taskMsgs)-1]
-				if a.OnPreTaskEnd != nil {
-					a.OnPreTaskEnd(task.Name)
-				}
-				return ErrToolCancelled
+			if a.OnToolDone != nil {
+				a.OnToolDone(tc.Function.Name, args, result)
 			}
 
-			// Append all tool results
-			taskMsgs = append(taskMsgs, toolResults...)
+			// Append tool result message
+			toolResults = append(toolResults, Message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    result.Output,
+			})
 		}
 
-		if a.OnPreTaskEnd != nil {
-			a.OnPreTaskEnd(task.Name)
+		// If cancelled, rollback and skip remaining pre-tasks
+		if cancelled {
+			taskMsgs = taskMsgs[:len(taskMsgs)-1]
+			if a.OnPreTaskEnd != nil {
+				a.OnPreTaskEnd(task.Name)
+			}
+			return ErrToolCancelled
 		}
+
+		// Append all tool results
+		taskMsgs = append(taskMsgs, toolResults...)
+	}
+
+	if a.OnPreTaskEnd != nil {
+		a.OnPreTaskEnd(task.Name)
 	}
 	return nil
 }
