@@ -121,11 +121,14 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 				break
 			}
 
-			// Execute tool with sandbox support for shell
+			// Execute tool with sandbox support for shell and python runtime
 			var result ToolResult
 			if tc.Function.Name == "run_shell" {
 				cmd, _ := args["command"].(string)
 				result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
+			} else if tc.Function.Name == "python_runtime" {
+				code, _ := args["code"].(string)
+				result = ExecuteShellWithSandbox(pythonCommand(code), a.OnSandboxFallback)
 			} else {
 				result = ExecuteTool(tc.Function.Name, args)
 			}
@@ -232,11 +235,14 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 				break
 			}
 
-			// Execute tool with sandbox support for shell
+			// Execute tool with sandbox support for shell and python runtime
 			var result ToolResult
 			if tc.Function.Name == "run_shell" {
 				cmd, _ := args["command"].(string)
 				result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
+			} else if tc.Function.Name == "python_runtime" {
+				code, _ := args["code"].(string)
+				result = ExecuteShellWithSandbox(pythonCommand(code), a.OnSandboxFallback)
 			} else {
 				result = ExecuteTool(tc.Function.Name, args)
 			}

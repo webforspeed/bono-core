@@ -70,6 +70,32 @@
   {
     "type": "function",
     "function": {
+      "name": "python_runtime",
+      "description": "Executes Python code inside the same sandbox used for shell commands. Use this for complex multi-step logic that would be cumbersome in shell. Returns stdout/stderr as output. Avoid network or privileged actions unless explicitly allowed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The Python code to execute."
+          },
+          "description": {
+            "type": "string",
+            "description": "A brief human-readable description of what this code accomplishes, for logging and review purposes"
+          },
+          "safety": {
+            "type": "string",
+            "enum": ["read-only", "modify", "destructive", "network", "privileged"],
+            "description": "Safety classification. 'read-only': no side effects. 'modify': reversible changes. 'destructive': irreversible. 'network': external requests. 'privileged': requires sudo."
+          }
+        },
+        "required": ["code", "description", "safety"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "edit_file",
       "description": "Performs a search-and-replace operation in a file. Use this for making targeted changes to existing files. The old_string must match exactly including all whitespace and newlines. Fails if old_string is not found. Fails if old_string matches multiple times unless replace_all is true. Always use read_file first to see the exact text you need to match.",
       "parameters": {

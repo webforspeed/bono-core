@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -97,6 +98,12 @@ func ExecuteShell(command string) ToolResult {
 	return result
 }
 
+// ExecutePython runs Python code using the configured executor (sandboxed or passthrough).
+func ExecutePython(code string) ToolResult {
+	command := pythonCommand(code)
+	return ExecuteShell(command)
+}
+
 // ExecuteShellUnsandboxed runs a shell command directly without sandboxing.
 // Used for fallback when sandbox blocks a command and user approves unsandboxed execution.
 func ExecuteShellUnsandboxed(command string) ToolResult {
@@ -147,6 +154,9 @@ func ExecuteTool(name string, args map[string]any) ToolResult {
 	case "run_shell":
 		cmd, _ := args["command"].(string)
 		return ExecuteShell(cmd)
+	case "python_runtime":
+		code, _ := args["code"].(string)
+		return ExecutePython(code)
 	default:
 		return ToolResult{
 			Success: false,
@@ -162,8 +172,21 @@ func RequiresConfirmation(name string, sandboxed bool) bool {
 	if name == "read_file" {
 		return false
 	}
-	if name == "run_shell" && sandboxed && IsSandboxEnabled() {
+	if (name == "run_shell" || name == "python_runtime") && sandboxed && IsSandboxEnabled() {
 		return false // sandboxed shell commands don't need approval
 	}
 	return true
+}
+
+func pythonCommand(code string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(code))
+	var b strings.Builder
+	b.WriteString("python3 - <<'PY'\n")
+	b.WriteString("import base64\n")
+	b.WriteString("code = base64.b64decode('")
+	b.WriteString(encoded)
+	b.WriteString("')\n")
+	b.WriteString("exec(compile(code, '<bono>', 'exec'))\n")
+	b.WriteString("PY\n")
+	return b.String()
 }

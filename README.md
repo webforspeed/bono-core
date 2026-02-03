@@ -122,6 +122,7 @@ The package includes execution functions for common tools:
 | `ExecuteWriteFile(path, content)` | Write content to file |
 | `ExecuteEditFile(path, old, new, replaceAll)` | String replacement in file |
 | `ExecuteShell(command)` | Execute shell command |
+| `ExecutePython(code)` | Execute Python code inside the sandbox |
 | `ExecuteTool(name, args)` | Dispatcher for all tools |
 
 ## Access Patterns
