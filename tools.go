@@ -105,6 +105,29 @@ func ExecuteShellUnsandboxed(command string) ToolResult {
 	return result
 }
 
+// ExecuteShellWithSandbox executes a shell command with sandbox support.
+// If sandbox blocks the command and onFallback returns true, executes unsandboxed.
+// onFallback receives (command, reason) and returns true to approve unsandboxed execution.
+func ExecuteShellWithSandbox(command string, onFallback func(cmd, reason string) bool) ToolResult {
+	if !IsSandboxEnabled() {
+		// No sandbox available - execute directly
+		return ExecuteShellUnsandboxed(command)
+	}
+
+	// Try sandboxed execution
+	result := ExecuteShell(command)
+
+	// Check if sandbox blocked
+	if result.ExecMeta != nil && result.ExecMeta.SandboxError {
+		if onFallback != nil && onFallback(command, result.ExecMeta.SandboxReason) {
+			return ExecuteShellUnsandboxed(command)
+		}
+		return result
+	}
+
+	return result
+}
+
 // ExecuteTool dispatches to the appropriate tool function.
 func ExecuteTool(name string, args map[string]any) ToolResult {
 	switch name {

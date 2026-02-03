@@ -12,6 +12,12 @@ var (
 	// ErrNoChoices is returned when the API response has no choices.
 	ErrNoChoices = errors.New("no choices in API response")
 
+	// ErrEmptyResponse is returned when the API returns an empty assistant message.
+	ErrEmptyResponse = errors.New("empty assistant response")
+
+	// ErrMaxTurnsExceeded is returned when a conversation exceeds the safety turn limit.
+	ErrMaxTurnsExceeded = errors.New("maximum turn limit exceeded")
+
 	// ErrToolCancelled is returned when tool execution is cancelled by user.
 	ErrToolCancelled = errors.New("tool execution cancelled by user")
 

@@ -8,7 +8,7 @@ General-purpose autonomous agent core and API client for building CLIs, TUIs, HT
 - [x] Built‑in file tools (read/write/edit)
 - [x] Shell execution with user approvals
 - [x] Pre-tasks system (run sub-agents before main chat)
-- [x] Default exploring task (auto-generates AGENT.md)
+- [x] Default exploring task (auto-generates AGENTS.md)
 - [ ] Worktree‑isolated runs (disposable workspaces)
 - [ ] Sandboxed execution (FS/command restrictions)
 - [ ] Skills system (prompt/tool bundles)
@@ -87,12 +87,12 @@ Pre-tasks are sub-agents that run automatically on the first `Chat()` call. They
 config := core.Config{
     // ... other config
     PreTasks: []core.PreTaskConfig{
-        core.DefaultExploringTask(), // auto-generates AGENT.md
+        core.DefaultExploringTask(), // auto-generates AGENTS.md
     },
 }
 ```
 
-The default exploring task ensures an `AGENT.md` file exists with project documentation (structure, conventions, rules). You can also define custom pre-tasks:
+The default exploring task ensures an `AGENTS.md` file exists with project documentation (structure, conventions, rules). You can also define custom pre-tasks:
 
 ```go
 core.PreTaskConfig{
@@ -109,7 +109,7 @@ Sub-agents are specialized agents that can be delegated specific tasks. They run
 
 | Sub-agent | Description |
 |-----------|-------------|
-| Explore | Analyzes the codebase and generates an `AGENT.md` file with project structure, conventions, and patterns |
+| Explore | Analyzes the codebase and generates an `AGENTS.md` file with project structure, conventions, and patterns |
 | Shell | Executes shell commands, analyzes output per custom instructions, and returns only relevant information. Can run follow-up commands autonomously to complete its task |
 
 ## Built-in Tools
@@ -166,7 +166,7 @@ http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 
 What makes this different from other open source agents:
 
-- **Self-documenting**: The agent automatically creates and maintains an `AGENT.md` file with project context. This runs as a separate sub-agent with its own context window, so the main agent doesn't suffer from context rot as the conversation grows.
+- **Self-documenting**: The agent automatically creates and maintains an `AGENTS.md` file with project context. This runs as a separate sub-agent with its own context window, so the main agent doesn't suffer from context rot as the conversation grows.
 
 - **Shell commands are sub-agents**: Every shell command runs through a dedicated sub-agent with its own context. The main agent provides instructions on what to extract, and the shell sub-agent handles execution, analyzes potentially verbose output, and returns only the relevant information. This keeps build logs, git diffs, and other noisy output from bloating the main context window.
 

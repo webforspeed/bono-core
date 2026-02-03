@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+const (
+	maxChatTurns    = 10
+	maxPreTaskTurns = 10
+)
+
 // Agent orchestrates conversations with an LLM and executes tools.
 type Agent struct {
 	config       Config
@@ -32,24 +37,6 @@ type Agent struct {
 
 	// OnPreTaskEnd is called when a pre-task completes.
 	OnPreTaskEnd func(name string)
-
-	// OnShellSubagentStart is called when a shell subagent begins execution.
-	// Receives the system prompt that defines the subagent's behavior.
-	OnShellSubagentStart func(systemPrompt string)
-
-	// OnShellSubagentEnd is called when a shell subagent completes.
-	// Receives the final result.
-	OnShellSubagentEnd func(result ToolResult)
-
-	// OnSubagentToolCall is called before a subagent executes a tool.
-	// Returns (shouldExecute, useSandbox). If shouldExecute is false, tool is cancelled.
-	// If useSandbox is true, command runs in sandbox (no approval needed if sandbox succeeds).
-	// The meta parameter contains sandbox info if this is a pre-execution check.
-	OnSubagentToolCall func(name string, args map[string]any, meta *ExecMeta) bool
-
-	// OnSubagentToolDone is called after a subagent tool executes.
-	// Receives the tool name, args (for display), and result.
-	OnSubagentToolDone func(name string, args map[string]any, result ToolResult)
 
 	// OnSandboxFallback is called when sandbox blocks a command.
 	// Return true to execute outside sandbox (requires approval), false to cancel.
@@ -95,33 +82,35 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 		a.preTasksDone = true
 	}
 
-	// Track command history for cumulative state injection
-	var commandHistory []string
-
 	a.msgs = append(a.msgs, Message{Role: "user", Content: input})
 
-	for {
+	for turns := 0; ; turns++ {
+		if turns >= maxChatTurns {
+			return "", ErrMaxTurnsExceeded
+		}
 		msg, err := a.client.ChatCompletion(ctx, a.msgs)
 		if err != nil {
 			return "", err
 		}
 
 		a.msgs = append(a.msgs, *msg)
+		content := messageContent(msg)
+		if a.OnMessage != nil && strings.TrimSpace(content) != "" {
+			a.OnMessage(content)
+		}
 
 		// No tool calls = done
 		if len(msg.ToolCalls) == 0 {
-			content, _ := msg.Content.(string)
-			if a.OnMessage != nil && content != "" {
-				a.OnMessage(content)
+			if content == "" {
+				return "", ErrEmptyResponse
 			}
 			return content, nil
 		}
 
-		// Track checkpoint for potential cancellation rollback
-		checkpoint := len(a.msgs) - 1
+		// Execute tools and collect results
+		var toolResults []Message
 		cancelled := false
 
-		// Execute tools
 		for _, tc := range msg.ToolCalls {
 			var args map[string]any
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
@@ -132,14 +121,11 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 				break
 			}
 
-			// Handle run_shell via subagent, other tools directly
+			// Execute tool with sandbox support for shell
 			var result ToolResult
 			if tc.Function.Name == "run_shell" {
 				cmd, _ := args["command"].(string)
-				desc, _ := args["description"].(string)
-				safety, _ := args["safety"].(string)
-				sysPrompt, _ := args["system_prompt"].(string)
-				result = a.ExecuteShellSubagent(ctx, cmd, desc, safety, sysPrompt)
+				result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
 			} else {
 				result = ExecuteTool(tc.Function.Name, args)
 			}
@@ -148,39 +134,22 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 				a.OnToolDone(tc.Function.Name, args, result)
 			}
 
-			// Accumulate command history for context
-			cmd, _ := args["command"].(string)
-			state := summarizeToolResult(tc.Function.Name, args, result)
-			if cmd != "" {
-				commandHistory = append(commandHistory, fmt.Sprintf("%s → %s", cmd, state))
-			} else {
-				commandHistory = append(commandHistory, state)
-			}
+			// Append tool result message
+			toolResults = append(toolResults, Message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    result.Output,
+			})
 		}
 
-		// If cancelled, rollback to checkpoint and return
+		// If cancelled, rollback to remove assistant message
 		if cancelled {
-			a.msgs = a.msgs[:checkpoint]
+			a.msgs = a.msgs[:len(a.msgs)-1]
 			return "", nil
 		}
 
-		// Build cumulative user message
-		var historyStr string
-		for i, h := range commandHistory {
-			historyStr += fmt.Sprintf("%d. %s\n", i+1, h)
-		}
-
-		// Find system prompt index
-		startIdx := 0
-		if len(a.msgs) > 0 && a.msgs[0].Role == "system" {
-			startIdx = 1
-		}
-
-		a.msgs = a.msgs[:startIdx]
-		a.msgs = append(a.msgs, Message{
-			Role:    "user",
-			Content: "User: " + input + "\n\n## Completed:\n" + historyStr + "\nContinue.",
-		})
+		// Append all tool results
+		a.msgs = append(a.msgs, toolResults...)
 	}
 }
 
@@ -194,188 +163,6 @@ func (a *Agent) Reset() {
 	a.msgs = nil
 	if a.config.SystemPrompt != "" {
 		a.msgs = append(a.msgs, Message{Role: "system", Content: a.config.SystemPrompt})
-	}
-}
-
-// SubagentShellTool is the simplified tool schema for shell subagents.
-// Only exposes run_shell without system_prompt (no nested subagents).
-var SubagentShellTool = []Tool{{
-	Type: "function",
-	Function: ToolFunction{
-		Name:        "run_shell",
-		Description: "Execute a shell command and return its output. Use for any follow-up commands needed to complete the task.",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"command": map[string]any{
-					"type":        "string",
-					"description": "The shell command to execute",
-				},
-			},
-			"required": []string{"command"},
-		},
-	},
-}}
-
-// ExecuteShellSubagent runs a command via a subagent with custom system prompt.
-// The subagent can run follow-up commands and returns summarized output.
-// Commands are executed in sandbox when available, with fallback to approval-based unsandboxed execution.
-func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, safety, systemPrompt string) ToolResult {
-	// Auto-enrich shell subagent prompts with OS context and best practices
-	systemPrompt = DefaultShellComposer().Compose(systemPrompt)
-
-	// Notify start with system prompt
-	if a.OnShellSubagentStart != nil {
-		a.OnShellSubagentStart(systemPrompt)
-	}
-
-	// 1. Execute initial command with sandbox support
-	initialArgs := map[string]any{"command": command, "description": description, "safety": safety}
-	result := a.executeShellWithSandbox(command, initialArgs)
-	if result.Output == "cancelled by user" {
-		if a.OnShellSubagentEnd != nil {
-			a.OnShellSubagentEnd(result)
-		}
-		return result
-	}
-
-	// Notify initial command done
-	if a.OnSubagentToolDone != nil {
-		a.OnSubagentToolDone("run_shell", initialArgs, result)
-	}
-
-	// 2. Create isolated subagent message history
-	msgs := []Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: "Command: " + command + "\n\nOutput:\n" + result.Output},
-	}
-
-	// 3. Subagent loop with shell-only tools
-	for {
-		msg, err := a.client.ChatCompletionWithTools(ctx, msgs, SubagentShellTool)
-		if err != nil {
-			errResult := ToolResult{Success: false, Error: err, Status: "subagent error"}
-			if a.OnShellSubagentEnd != nil {
-				a.OnShellSubagentEnd(errResult)
-			}
-			return errResult
-		}
-		msgs = append(msgs, *msg)
-
-		// No tool calls - subagent is done
-		if len(msg.ToolCalls) == 0 {
-			content, _ := msg.Content.(string)
-			finalResult := ToolResult{Success: true, Output: strings.TrimSpace(content), Status: "ok"}
-			if a.OnShellSubagentEnd != nil {
-				a.OnShellSubagentEnd(finalResult)
-			}
-			return finalResult
-		}
-
-		// Execute follow-up shell commands
-		for _, tc := range msg.ToolCalls {
-			var args map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			cmd, _ := args["command"].(string)
-
-			// Execute with sandbox support
-			toolResult := a.executeShellWithSandbox(cmd, args)
-			if toolResult.Output == "cancelled by user" {
-				msgs = append(msgs, Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    "cancelled by user",
-				})
-				continue
-			}
-
-			// Notify follow-up command done
-			if a.OnSubagentToolDone != nil {
-				a.OnSubagentToolDone("run_shell", args, toolResult)
-			}
-
-			msgs = append(msgs, Message{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Content:    toolResult.Output,
-			})
-		}
-	}
-}
-
-// executeShellWithSandbox executes a shell command with sandbox support and fallback.
-// If sandbox is enabled, tries sandboxed execution first.
-// If sandbox blocks, requests fallback approval via OnSandboxFallback hook.
-// If sandbox is disabled or unavailable, requests approval via OnSubagentToolCall hook.
-func (a *Agent) executeShellWithSandbox(command string, args map[string]any) ToolResult {
-	sandboxEnabled := IsSandboxEnabled()
-
-	if sandboxEnabled {
-		// Try sandboxed execution first
-		result := ExecuteShell(command)
-
-		// Check if sandbox blocked the command
-		if result.ExecMeta != nil && result.ExecMeta.SandboxError {
-			// Sandbox blocked - check if fallback is enabled
-			if a.config.Sandbox.FallbackOutsideSandbox || DefaultSandboxConfig().FallbackOutsideSandbox {
-				// Request approval for unsandboxed execution
-				if a.OnSandboxFallback != nil {
-					reason := result.ExecMeta.SandboxReason
-					if !a.OnSandboxFallback(command, reason) {
-						return ToolResult{Success: false, Output: "cancelled by user", Status: "cancelled"}
-					}
-					// User approved fallback - run unsandboxed
-					return ExecuteShellUnsandboxed(command)
-				}
-			}
-			// Fallback not enabled or no hook - return sandbox error
-			return result
-		}
-
-		// Sandbox execution succeeded (or command failed for non-sandbox reasons)
-		// Notify hook for display purposes (sandboxed execution doesn't need prior approval)
-		if a.OnSubagentToolCall != nil {
-			meta := result.ExecMeta
-			if meta == nil {
-				meta = &ExecMeta{Sandboxed: true}
-			}
-			// This is a notification-only call for sandboxed execution
-			a.OnSubagentToolCall("run_shell", args, meta)
-		}
-		return result
-	}
-
-	// Sandbox not enabled - require approval before execution
-	if a.OnSubagentToolCall != nil {
-		meta := &ExecMeta{Sandboxed: false}
-		if !a.OnSubagentToolCall("run_shell", args, meta) {
-			return ToolResult{Success: false, Output: "cancelled by user", Status: "cancelled"}
-		}
-	}
-
-	return ExecuteShellUnsandboxed(command)
-}
-
-// summarizeToolResult generates concise state from tool execution for context injection.
-func summarizeToolResult(name string, args map[string]any, result ToolResult) string {
-	switch name {
-	case "run_shell":
-		return result.Output // Subagent already summarizes
-	case "read_file":
-		path, _ := args["path"].(string)
-		content := result.Output
-		// if len(content) > 2000 {
-		// 	content = content[:2000] + "\n... (truncated)"
-		// }
-		return fmt.Sprintf("Read %s:\n%s", path, content)
-	case "write_file", "edit_file":
-		path, _ := args["path"].(string)
-		return fmt.Sprintf("Modified %s", path)
-	default:
-		if len(result.Output) > 100 {
-			return result.Output[:100] + "..."
-		}
-		return result.Output
 	}
 }
 
@@ -395,35 +182,33 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 		}
 		taskMsgs = append(taskMsgs, Message{Role: "user", Content: input})
 
-		// Track command history for cumulative state injection
-		var commandHistory []string
-
 		// Run task loop until DoneMarker detected
-		for {
+		for turns := 0; ; turns++ {
+			if turns >= maxPreTaskTurns {
+				return fmt.Errorf("pretask %s: %w", task.Name, ErrMaxTurnsExceeded)
+			}
 			msg, err := a.client.ChatCompletion(ctx, taskMsgs)
 			if err != nil {
 				return err
 			}
 			taskMsgs = append(taskMsgs, *msg)
-
-			// Check for completion (no tool calls and contains done marker)
-			if len(msg.ToolCalls) == 0 {
-				if content, ok := msg.Content.(string); ok {
-					if a.OnMessage != nil && content != "" {
-						a.OnMessage(content)
-					}
-					if strings.Contains(content, task.DoneMarker) {
-						break
-					}
-				}
-				continue
+			content := messageContent(msg)
+			if a.OnMessage != nil && strings.TrimSpace(content) != "" {
+				a.OnMessage(content)
 			}
 
-			// Track checkpoint for potential cancellation rollback
-			checkpoint := len(taskMsgs) - 1
+			// Check for completion (no tool calls)
+			if len(msg.ToolCalls) == 0 {
+				if content == "" {
+					return fmt.Errorf("pretask %s: %w", task.Name, ErrEmptyResponse)
+				}
+				break
+			}
+
+			// Execute tools and collect results
+			var toolResults []Message
 			cancelled := false
 
-			// Execute tools (using existing hooks)
 			for _, tc := range msg.ToolCalls {
 				var args map[string]any
 				json.Unmarshal([]byte(tc.Function.Arguments), &args)
@@ -434,14 +219,11 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 					break
 				}
 
-				// Handle run_shell via subagent, other tools directly
+				// Execute tool with sandbox support for shell
 				var result ToolResult
 				if tc.Function.Name == "run_shell" {
 					cmd, _ := args["command"].(string)
-					desc, _ := args["description"].(string)
-					safety, _ := args["safety"].(string)
-					sysPrompt, _ := args["system_prompt"].(string)
-					result = a.ExecuteShellSubagent(ctx, cmd, desc, safety, sysPrompt)
+					result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
 				} else {
 					result = ExecuteTool(tc.Function.Name, args)
 				}
@@ -450,34 +232,25 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 					a.OnToolDone(tc.Function.Name, args, result)
 				}
 
-				// Accumulate command history for context
-				cmd, _ := args["command"].(string)
-				state := summarizeToolResult(tc.Function.Name, args, result)
-				if cmd != "" {
-					commandHistory = append(commandHistory, fmt.Sprintf("%s → %s", cmd, state))
-				} else {
-					commandHistory = append(commandHistory, state)
-				}
-
-				// Build cumulative user message
-				var historyStr string
-				for i, h := range commandHistory {
-					historyStr += fmt.Sprintf("%d. %s\n", i+1, h)
-				}
-				taskMsgs = []Message{
-					taskMsgs[0], // keep system prompt
-					{Role: "user", Content: "## Completed:\n" + historyStr + "\nContinue."},
-				}
+				// Append tool result message
+				toolResults = append(toolResults, Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    result.Output,
+				})
 			}
 
 			// If cancelled, rollback and skip remaining pre-tasks
 			if cancelled {
-				taskMsgs = taskMsgs[:checkpoint]
+				taskMsgs = taskMsgs[:len(taskMsgs)-1]
 				if a.OnPreTaskEnd != nil {
 					a.OnPreTaskEnd(task.Name)
 				}
 				return ErrToolCancelled
 			}
+
+			// Append all tool results
+			taskMsgs = append(taskMsgs, toolResults...)
 		}
 
 		if a.OnPreTaskEnd != nil {
@@ -485,4 +258,34 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func messageContent(msg *Message) string {
+	if msg == nil {
+		return ""
+	}
+	switch v := msg.Content.(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, part := range v {
+			m, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			if t != "text" && t != "output_text" {
+				continue
+			}
+			text, _ := m["text"].(string)
+			if text == "" {
+				continue
+			}
+			b.WriteString(text)
+		}
+		return b.String()
+	default:
+		return ""
+	}
 }

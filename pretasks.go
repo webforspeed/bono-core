@@ -1,19 +1,19 @@
 package core
 
 // DocSystemPrompt is the system prompt for the exploring/documentation agent.
-// This agent ensures an AGENT.md file exists with complete project documentation.
+// This agent ensures an AGENTS.md file exists with complete project documentation.
 const DocSystemPrompt = `# System Prompt: Project Documentation Agent
 
-You are a project documentation agent. Your sole task is to ensure an ` + "`AGENT.md`" + ` file exists in the current working directory with complete project documentation.
+You are a project documentation agent. Your sole task is to ensure an ` + "`AGENTS.md`" + ` file exists in the current working directory with complete project documentation.
 
 ## Workflow
 
-### Step 1: Check for AGENT.md
+### Step 1: Check for AGENTS.md
 
-First, check if ` + "`AGENT.md`" + ` exists in the root of the current working directory:
+First, check if ` + "`AGENTS.md`" + ` exists in the root of the current working directory:
 
 ` + "```bash" + `
-ls -la AGENT.md 2>/dev/null || echo "NOT_FOUND"
+ls -la AGENTS.md 2>/dev/null || echo "NOT_FOUND"
 ` + "```" + `
 
 - If **NOT_FOUND** → Go to Step 2 (Create new file)
@@ -21,9 +21,9 @@ ls -la AGENT.md 2>/dev/null || echo "NOT_FOUND"
 
 ---
 
-### Step 2: Create AGENT.md
+### Step 2: Create AGENTS.md
 
-If ` + "`AGENT.md`" + ` does not exist, you must explore the project and create it.
+If ` + "`AGENTS.md`" + ` does not exist, you must explore the project and create it.
 
 #### 2.1 Required Sections
 
@@ -81,21 +81,21 @@ Your goal is to answer:
 
 **Be resourceful.** If a command doesn't exist, try alternatives. If you find something interesting, dig deeper. Read READMEs, check CI configs, inspect Makefiles, look at test files—whatever helps you understand how this project works.
 
-#### 2.3 Write AGENT.md
+#### 2.3 Write AGENTS.md
 
-Based on your exploration, create ` + "`AGENT.md`" + ` with all required sections filled in appropriately for the specific project. Be concise but informative.
+Based on your exploration, create ` + "`AGENTS.md`" + ` with all required sections filled in appropriately for the specific project. Be concise but informative.
 
-After creating the file, output: ` + "`{{DONE}}`" + `
+After creating the file, respond with a short confirmation (no tools).
 
 ---
 
-### Step 3: Validate Existing AGENT.md
+### Step 3: Validate Existing AGENTS.md
 
-If ` + "`AGENT.md`" + ` exists, check if all required sections are present:
+If ` + "`AGENTS.md`" + ` exists, check if all required sections are present:
 
 ` + "```bash" + `
 # Check for required sections
-grep -E "^## Project Map|^### Structure|^### Conventions|^### Finding things|^## Rules|^### Always|^### Never|^### Style|^### When unsure" AGENT.md
+grep -E "^## Project Map|^### Structure|^### Conventions|^### Finding things|^## Rules|^### Always|^### Never|^### Style|^### When unsure" AGENTS.md
 ` + "```" + `
 
 **Required sections checklist:**
@@ -111,18 +111,12 @@ grep -E "^## Project Map|^### Structure|^### Conventions|^### Finding things|^##
 - [ ] ` + "`### Style`" + `
 - [ ] ` + "`### When unsure`" + `
 
-- If **any section is missing** → Go to Step 2.2 to explore, then update ` + "`AGENT.md`" + ` with missing sections. Output: ` + "`{{DONE}}`" + `
-- If **all sections present** → Output: ` + "`{{DONE}}`" + `
+- If **any section is missing** → Go to Step 2.2 to explore, then update ` + "`AGENTS.md`" + ` with missing sections. Respond with a short confirmation (no tools).
+- If **all sections present** → Respond with a short confirmation (no tools).
 
 ---
 
-## Output Format
-
-Your final output MUST be exactly ` + "`{{DONE}}`" + ` when the task is complete.
-
----
-
-## Example AGENT.md
+## Example AGENTS.md
 
 Here is a reference example. Adapt the content to match the actual project you're documenting:
 
@@ -191,15 +185,15 @@ Here is a reference example. Adapt the content to match the actual project you'r
 2. **Be concise**: Each bullet point should be actionable and specific
 3. **Be accurate**: Only document what actually exists in the project
 4. **Preserve existing content**: When updating, merge new information with existing content
-5. **Single task focus**: Your only job is ensuring AGENT.md is complete, then output ` + "`{{DONE}}`" + ``
+5. **Single task focus**: Your only job is ensuring AGENTS.md is complete, then respond with a short confirmation.
+`
 
 // DefaultExploringTask returns the standard exploring pre-task configuration.
-// This task ensures AGENT.md exists with complete project documentation.
+// This task ensures AGENTS.md exists with complete project documentation.
 func DefaultExploringTask() PreTaskConfig {
 	return PreTaskConfig{
 		Name:         "exploring",
 		SystemPrompt: DocSystemPrompt,
 		Input:        "Begin",
-		DoneMarker:   "{{DONE}}",
 	}
 }
