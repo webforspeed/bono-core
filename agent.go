@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -94,6 +95,9 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 		a.preTasksDone = true
 	}
 
+	// Track command history for cumulative state injection
+	var commandHistory []string
+
 	a.msgs = append(a.msgs, Message{Role: "user", Content: input})
 
 	for {
@@ -144,11 +148,14 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 				a.OnToolDone(tc.Function.Name, args, result)
 			}
 
-			a.msgs = append(a.msgs, Message{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Content:    result.Output,
-			})
+			// Accumulate command history for context
+			cmd, _ := args["command"].(string)
+			state := summarizeToolResult(tc.Function.Name, args, result)
+			if cmd != "" {
+				commandHistory = append(commandHistory, fmt.Sprintf("%s → %s", cmd, state))
+			} else {
+				commandHistory = append(commandHistory, state)
+			}
 		}
 
 		// If cancelled, rollback to checkpoint and return
@@ -156,6 +163,24 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 			a.msgs = a.msgs[:checkpoint]
 			return "", nil
 		}
+
+		// Build cumulative user message
+		var historyStr string
+		for i, h := range commandHistory {
+			historyStr += fmt.Sprintf("%d. %s\n", i+1, h)
+		}
+
+		// Find system prompt index
+		startIdx := 0
+		if len(a.msgs) > 0 && a.msgs[0].Role == "system" {
+			startIdx = 1
+		}
+
+		a.msgs = a.msgs[:startIdx]
+		a.msgs = append(a.msgs, Message{
+			Role:    "user",
+			Content: "User: " + input + "\n\n## Completed:\n" + historyStr + "\nContinue.",
+		})
 	}
 }
 
@@ -196,6 +221,9 @@ var SubagentShellTool = []Tool{{
 // The subagent can run follow-up commands and returns summarized output.
 // Commands are executed in sandbox when available, with fallback to approval-based unsandboxed execution.
 func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, safety, systemPrompt string) ToolResult {
+	// Auto-enrich shell subagent prompts with OS context and best practices
+	systemPrompt = DefaultShellComposer().Compose(systemPrompt)
+
 	// Notify start with system prompt
 	if a.OnShellSubagentStart != nil {
 		a.OnShellSubagentStart(systemPrompt)
@@ -234,24 +262,14 @@ func (a *Agent) ExecuteShellSubagent(ctx context.Context, command, description, 
 		}
 		msgs = append(msgs, *msg)
 
-		// No tool calls - check for done marker
+		// No tool calls - subagent is done
 		if len(msg.ToolCalls) == 0 {
-			if content, ok := msg.Content.(string); ok {
-				if strings.Contains(content, "{{SHELL_DONE}}") {
-					parts := strings.SplitN(content, "{{SHELL_DONE}}", 2)
-					var finalResult ToolResult
-					if len(parts) > 1 {
-						finalResult = ToolResult{Success: true, Output: strings.TrimSpace(parts[1]), Status: "ok"}
-					} else {
-						finalResult = ToolResult{Success: true, Output: content, Status: "ok"}
-					}
-					if a.OnShellSubagentEnd != nil {
-						a.OnShellSubagentEnd(finalResult)
-					}
-					return finalResult
-				}
+			content, _ := msg.Content.(string)
+			finalResult := ToolResult{Success: true, Output: strings.TrimSpace(content), Status: "ok"}
+			if a.OnShellSubagentEnd != nil {
+				a.OnShellSubagentEnd(finalResult)
 			}
-			continue
+			return finalResult
 		}
 
 		// Execute follow-up shell commands
@@ -338,6 +356,29 @@ func (a *Agent) executeShellWithSandbox(command string, args map[string]any) Too
 	return ExecuteShellUnsandboxed(command)
 }
 
+// summarizeToolResult generates concise state from tool execution for context injection.
+func summarizeToolResult(name string, args map[string]any, result ToolResult) string {
+	switch name {
+	case "run_shell":
+		return result.Output // Subagent already summarizes
+	case "read_file":
+		path, _ := args["path"].(string)
+		content := result.Output
+		// if len(content) > 2000 {
+		// 	content = content[:2000] + "\n... (truncated)"
+		// }
+		return fmt.Sprintf("Read %s:\n%s", path, content)
+	case "write_file", "edit_file":
+		path, _ := args["path"].(string)
+		return fmt.Sprintf("Modified %s", path)
+	default:
+		if len(result.Output) > 100 {
+			return result.Output[:100] + "..."
+		}
+		return result.Output
+	}
+}
+
 // runPreTasks executes all configured pre-tasks before the main agent loop.
 // Each pre-task runs with its own isolated message history.
 func (a *Agent) runPreTasks(ctx context.Context) error {
@@ -353,6 +394,9 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 			input = "Begin"
 		}
 		taskMsgs = append(taskMsgs, Message{Role: "user", Content: input})
+
+		// Track command history for cumulative state injection
+		var commandHistory []string
 
 		// Run task loop until DoneMarker detected
 		for {
@@ -406,11 +450,24 @@ func (a *Agent) runPreTasks(ctx context.Context) error {
 					a.OnToolDone(tc.Function.Name, args, result)
 				}
 
-				taskMsgs = append(taskMsgs, Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    result.Output,
-				})
+				// Accumulate command history for context
+				cmd, _ := args["command"].(string)
+				state := summarizeToolResult(tc.Function.Name, args, result)
+				if cmd != "" {
+					commandHistory = append(commandHistory, fmt.Sprintf("%s → %s", cmd, state))
+				} else {
+					commandHistory = append(commandHistory, state)
+				}
+
+				// Build cumulative user message
+				var historyStr string
+				for i, h := range commandHistory {
+					historyStr += fmt.Sprintf("%d. %s\n", i+1, h)
+				}
+				taskMsgs = []Message{
+					taskMsgs[0], // keep system prompt
+					{Role: "user", Content: "## Completed:\n" + historyStr + "\nContinue."},
+				}
 			}
 
 			// If cancelled, rollback and skip remaining pre-tasks

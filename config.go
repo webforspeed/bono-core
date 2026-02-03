@@ -30,6 +30,7 @@ type Config struct {
 	HTTPTimeout  time.Duration   // HTTP client timeout
 	PreTasks     []PreTaskConfig // Pre-tasks to run on first Chat() call
 	Sandbox      SandboxConfig   // Sandbox configuration for shell execution
+	APILogPath   string          // Path to JSONL log file (default: logs/api_calls.jsonl)
 }
 
 // Validate checks the configuration and sets defaults.
@@ -45,6 +46,9 @@ func (c *Config) Validate() error {
 	}
 	if c.HTTPTimeout == 0 {
 		c.HTTPTimeout = 30 * time.Second
+	}
+	if c.APILogPath == "" {
+		c.APILogPath = "logs/api_calls.jsonl"
 	}
 	return nil
 }
