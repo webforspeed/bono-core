@@ -1,6 +1,7 @@
 # Bono Core
 
 General-purpose autonomous agent core and API client for building CLIs, TUIs, HTTP services, IDE extensions, and other app integrations.
+Currently used by [Bono](https://github.com/webforspeed/bono)
 
 ## Features
 
