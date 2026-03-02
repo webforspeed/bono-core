@@ -107,6 +107,7 @@ type Config struct {
 	HTTPTimeout time.Duration // HTTP client timeout (defaults to 120s).
 	HTTPReferer string        // Optional HTTP-Referer header.
 	AppTitle    string        // Optional X-Title header.
+	HTTPClient  *http.Client  // If non-nil, used instead of creating a default client.
 }
 
 func (c *Config) defaults() {
@@ -155,9 +156,13 @@ func NewMessagesClient(cfg Config) (*MessagesClient, error) {
 		return nil, ErrMissingAPIKey
 	}
 	cfg.defaults()
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: cfg.HTTPTimeout}
+	}
 	return &MessagesClient{
 		config:     cfg,
-		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
+		httpClient: httpClient,
 	}, nil
 }
 
@@ -436,9 +441,13 @@ func NewCompletionsClient(cfg Config) (*CompletionsClient, error) {
 		return nil, ErrMissingAPIKey
 	}
 	cfg.defaults()
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: cfg.HTTPTimeout}
+	}
 	return &CompletionsClient{
 		config:     cfg,
-		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
+		httpClient: httpClient,
 	}, nil
 }
 
@@ -707,9 +716,13 @@ func NewResponsesClient(cfg Config) (*ResponsesClient, error) {
 		return nil, ErrMissingAPIKey
 	}
 	cfg.defaults()
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: cfg.HTTPTimeout}
+	}
 	return &ResponsesClient{
 		config:     cfg,
-		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
+		httpClient: httpClient,
 	}, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,12 +16,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/webforspeed/bono-core/llm"
 )
 
-// Client handles communication with the chat completions API.
+// Client handles communication with the LLM API.
+// LLM inference calls are routed through an llm.Provider; additional
+// concerns (logging, middleware, model-limit tracking) stay here.
 type Client struct {
 	config     Config
-	httpClient *http.Client
+	httpClient *http.Client         // for non-LLM calls (model limits)
+	provider   llm.Provider         // routes LLM inference calls
+	transport  *capturingTransport  // captures raw HTTP data for logging
 	logPath    string
 
 	modelLimitsMu sync.RWMutex
@@ -78,14 +85,36 @@ type modelEndpointLimit struct {
 }
 
 // NewClient creates a new API client with the given configuration.
+// LLM inference calls are routed through llm.CompletionsClient;
+// a capturing HTTP transport preserves raw body logging.
 func NewClient(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 
+	transport := &capturingTransport{base: http.DefaultTransport}
+	llmHTTPClient := &http.Client{
+		Timeout:   config.HTTPTimeout,
+		Transport: transport,
+	}
+
+	provider, err := llm.NewCompletionsClient(llm.Config{
+		APIKey:      config.APIKey,
+		BaseURL:     config.BaseURL,
+		HTTPTimeout: config.HTTPTimeout,
+		HTTPReferer: "http://localhost",
+		AppTitle:    "Agent",
+		HTTPClient:  llmHTTPClient,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create llm provider: %w", err)
+	}
+
 	c := &Client{
 		config:      config,
 		httpClient:  &http.Client{Timeout: config.HTTPTimeout},
+		provider:    provider,
+		transport:   transport,
 		logPath:     config.APILogPath,
 		modelLimits: make(map[string]modelLimitCacheEntry),
 	}
@@ -513,119 +542,252 @@ func (c *Client) ChatCompletion(ctx context.Context, messages []Message) (*Messa
 }
 
 // ChatCompletionWithTools sends messages with a custom tool set.
-// Use this when you need to override the default tools (e.g., for subagents).
+// All LLM inference calls are routed through the llm.Provider.
 func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
-	start := time.Now()
-	req := ChatRequest{
-		Model:    c.config.Model,
-		Messages: c.applyMiddleware(messages),
-		Tools:    tools,
-	}
+	req := buildLLMRequest(c.config.Model, c.applyMiddleware(messages), tools)
 
-	body, err := json.Marshal(req)
+	resp, err := c.provider.SendMessage(ctx, req)
+
+	// Log and track usage from captured HTTP data.
+	captured := c.transport.lastCapture()
+	c.logFromCapture(captured, err)
+
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		// Translate llm errors to core errors for backward compat.
+		if errors.Is(err, llm.ErrNoChoices) {
+			return nil, ErrNoChoices
+		}
+		var llmErr *llm.APIError
+		if errors.As(err, &llmErr) {
+			body := llmErr.Message
+			if body == "" {
+				body = llmErr.RawBody
+			}
+			return nil, &APIError{StatusCode: llmErr.StatusCode, Body: body}
+		}
+		return nil, fmt.Errorf("llm request: %w", err)
 	}
 
-	requestURL := c.config.BaseURL + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+	return llmResponseToMessage(resp), nil
+}
+
+// logFromCapture logs an API call using data captured by the HTTP transport.
+func (c *Client) logFromCapture(captured *capturedRoundTrip, callErr error) {
+	if captured == nil {
+		return
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("HTTP-Referer", "http://localhost")
-	httpReq.Header.Set("X-Title", "Agent")
-
-	requestPayload := payloadForLog(body)
-	requestHeaders := headersForLog(httpReq.Header, true)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		c.logAPICall(APILogEntry{
-			Timestamp:      time.Now().UTC().Format(time.RFC3339),
-			RequestPayload: requestPayload,
-			RequestURL:     requestURL,
-			RequestHeaders: requestHeaders,
-			Error:          err.Error(),
-			DurationMs:     time.Since(start).Milliseconds(),
-		})
-		return nil, fmt.Errorf("http request: %w", err)
+	var responseUsage *ResponseUsage
+	if captured.StatusCode == http.StatusOK && len(captured.ResponseBody) > 0 {
+		responseUsage = c.buildResponseUsage(captured.ResponseBody, c.config.Model)
 	}
-	defer resp.Body.Close()
-
-	responseBody, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		c.logAPICall(APILogEntry{
-			Timestamp:       time.Now().UTC().Format(time.RFC3339),
-			RequestPayload:  requestPayload,
-			RequestURL:      requestURL,
-			RequestHeaders:  requestHeaders,
-			StatusCode:      resp.StatusCode,
-			ResponseHeaders: headersForLog(resp.Header, false),
-			Error:           readErr.Error(),
-			DurationMs:      time.Since(start).Milliseconds(),
-		})
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-
-	responsePayload := payloadForLog(responseBody)
-	responseHeaders := headersForLog(resp.Header, false)
-	responseUsage := c.buildResponseUsage(responseBody, req.Model)
 	if responseUsage != nil {
 		c.lastUsage = responseUsage
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		apiErr := &APIError{StatusCode: resp.StatusCode, Body: string(responseBody)}
-		c.logAPICall(APILogEntry{
-			Timestamp:       time.Now().UTC().Format(time.RFC3339),
-			RequestPayload:  requestPayload,
-			RequestURL:      requestURL,
-			RequestHeaders:  requestHeaders,
-			StatusCode:      resp.StatusCode,
-			ResponsePayload: responsePayload,
-			ResponseUsage:   responseUsage,
-			ResponseHeaders: responseHeaders,
-			Error:           apiErr.Error(),
-			DurationMs:      time.Since(start).Milliseconds(),
-		})
-		return nil, apiErr
-	}
-
-	var chatResp ChatResponse
-	if err := json.Unmarshal(responseBody, &chatResp); err != nil {
-		c.logAPICall(APILogEntry{
-			Timestamp:       time.Now().UTC().Format(time.RFC3339),
-			RequestPayload:  requestPayload,
-			RequestURL:      requestURL,
-			RequestHeaders:  requestHeaders,
-			StatusCode:      resp.StatusCode,
-			ResponsePayload: responsePayload,
-			ResponseUsage:   responseUsage,
-			ResponseHeaders: responseHeaders,
-			Error:           err.Error(),
-			DurationMs:      time.Since(start).Milliseconds(),
-		})
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	c.logAPICall(APILogEntry{
+	entry := APILogEntry{
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
-		RequestPayload:  requestPayload,
-		RequestURL:      requestURL,
-		RequestHeaders:  requestHeaders,
-		StatusCode:      resp.StatusCode,
-		ResponsePayload: responsePayload,
+		RequestURL:      captured.RequestURL,
+		RequestPayload:  payloadForLog(captured.RequestBody),
+		RequestHeaders:  headersForLog(captured.RequestHeaders, true),
+		StatusCode:      captured.StatusCode,
+		ResponsePayload: payloadForLog(captured.ResponseBody),
 		ResponseUsage:   responseUsage,
-		ResponseHeaders: responseHeaders,
-		DurationMs:      time.Since(start).Milliseconds(),
-	})
-
-	if len(chatResp.Choices) == 0 {
-		return nil, ErrNoChoices
+		ResponseHeaders: headersForLog(captured.ResponseHeaders, false),
+		DurationMs:      captured.Duration.Milliseconds(),
+	}
+	if callErr != nil {
+		entry.Error = callErr.Error()
+	} else if captured.Error != nil {
+		entry.Error = captured.Error.Error()
 	}
 
-	return &chatResp.Choices[0].Message, nil
+	c.logAPICall(entry)
+}
+
+// --- Type conversion: core <-> llm ---
+
+// buildLLMRequest converts core messages + tools into an llm.Request.
+// System messages are extracted to llm.Request.System.
+// Consecutive tool-role messages are grouped into a single llm.Message with ToolResults.
+func buildLLMRequest(model string, messages []Message, tools []Tool) *llm.Request {
+	req := &llm.Request{Model: model}
+
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			s := contentString(msg.Content)
+			if req.System != "" {
+				req.System += "\n\n" + s
+			} else {
+				req.System = s
+			}
+
+		case "user":
+			req.Messages = append(req.Messages, llm.Message{
+				Role:    llm.RoleUser,
+				Content: contentString(msg.Content),
+			})
+
+		case "assistant":
+			lmsg := llm.Message{
+				Role:    llm.RoleAssistant,
+				Content: contentString(msg.Content),
+			}
+			for _, tc := range msg.ToolCalls {
+				lmsg.ToolCalls = append(lmsg.ToolCalls, llm.ToolCall{
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: parseToolInput(tc.Function.Arguments),
+				})
+			}
+			req.Messages = append(req.Messages, lmsg)
+
+		case "tool":
+			tr := llm.ToolResult{
+				ToolUseID: msg.ToolCallID,
+				Content:   contentString(msg.Content),
+			}
+			// Group consecutive tool messages into one llm.Message.
+			if n := len(req.Messages); n > 0 && len(req.Messages[n-1].ToolResults) > 0 {
+				req.Messages[n-1].ToolResults = append(req.Messages[n-1].ToolResults, tr)
+			} else {
+				req.Messages = append(req.Messages, llm.Message{
+					Role:        llm.RoleUser,
+					ToolResults: []llm.ToolResult{tr},
+				})
+			}
+		}
+	}
+
+	for _, t := range tools {
+		req.Tools = append(req.Tools, llm.Tool{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  t.Function.Parameters,
+		})
+	}
+
+	return req
+}
+
+// llmResponseToMessage converts an llm.Response to a core.Message.
+func llmResponseToMessage(resp *llm.Response) *Message {
+	msg := &Message{
+		Role:    "assistant",
+		Content: resp.Content,
+	}
+	for _, tc := range resp.ToolCalls {
+		args, _ := json.Marshal(tc.Input)
+		msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+			ID:   tc.ID,
+			Type: "function",
+			Function: FunctionCall{
+				Name:      tc.Name,
+				Arguments: string(args),
+			},
+		})
+	}
+	return msg
+}
+
+// contentString extracts a plain string from a core.Message.Content value.
+// Content may be a string or []any of content blocks.
+func contentString(v any) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, part := range c {
+			m, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			if t != "text" && t != "output_text" {
+				continue
+			}
+			text, _ := m["text"].(string)
+			if text != "" {
+				b.WriteString(text)
+			}
+		}
+		return b.String()
+	default:
+		return ""
+	}
+}
+
+// parseToolInput parses a JSON arguments string into map[string]any.
+func parseToolInput(args string) map[string]any {
+	if args == "" {
+		return nil
+	}
+	var input map[string]any
+	json.Unmarshal([]byte(args), &input)
+	return input
+}
+
+// --- Capturing HTTP transport ---
+
+// capturingTransport wraps an http.RoundTripper and captures the last request/response.
+// Each Client owns one instance and calls SendMessage sequentially.
+type capturingTransport struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	last *capturedRoundTrip
+}
+
+type capturedRoundTrip struct {
+	RequestURL      string
+	RequestHeaders  http.Header
+	RequestBody     []byte
+	ResponseHeaders http.Header
+	ResponseBody    []byte
+	StatusCode      int
+	Duration        time.Duration
+	Error           error
+}
+
+func (t *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	captured := &capturedRoundTrip{
+		RequestURL:     req.URL.String(),
+		RequestHeaders: req.Header.Clone(),
+	}
+
+	if req.Body != nil {
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		captured.RequestBody = body
+	}
+
+	start := time.Now()
+	resp, err := t.base.RoundTrip(req)
+	captured.Duration = time.Since(start)
+	captured.Error = err
+
+	if resp != nil {
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			captured.Error = readErr
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		captured.ResponseHeaders = resp.Header.Clone()
+		captured.ResponseBody = body
+		captured.StatusCode = resp.StatusCode
+	}
+
+	t.mu.Lock()
+	t.last = captured
+	t.mu.Unlock()
+
+	return resp, err
+}
+
+func (t *capturingTransport) lastCapture() *capturedRoundTrip {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.last
 }
