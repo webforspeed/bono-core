@@ -67,3 +67,26 @@ type ExecMeta struct {
 	SandboxError  bool   // true if sandbox blocked execution
 	SandboxReason string // reason if sandbox blocked (e.g., "write outside cwd")
 }
+
+// ToolDef is a self-contained tool definition: schema + execution + policy.
+// All tools are *ToolDef — no sub-types, no special cases.
+// Dependencies are injected via constructor parameters as closures.
+type ToolDef struct {
+	Name        string
+	Description string
+	Parameters  map[string]any
+	Execute     func(args map[string]any) ToolResult
+	AutoApprove func(sandboxed bool) bool
+}
+
+// Tool returns the API-ready Tool struct for sending to the LLM.
+func (t *ToolDef) Tool() Tool {
+	return Tool{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  t.Parameters,
+		},
+	}
+}

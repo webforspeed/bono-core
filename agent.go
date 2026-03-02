@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	maxChatTurns    = 10
+	maxChatTurns    = 20 // allows for summary rounds that compress context
 	maxPreTaskTurns = 10
 )
 
@@ -16,6 +16,8 @@ const (
 type Agent struct {
 	config       Config
 	client       *Client
+	registry     *Registry
+	apiTools     []Tool // resolved from registry, filtered by AllowedTools
 	msgs         []Message
 	preTasksDone bool // tracks if pre-tasks have executed
 
@@ -63,10 +65,37 @@ func NewAgent(config Config) (*Agent, error) {
 	InitSandbox(sandboxCfg)
 
 	a := &Agent{config: config, client: client}
+
+	// Build tool registry — all tools get the same treatment.
+	// Dependencies are injected as closures that capture the agent pointer.
+	// Hooks (OnSandboxFallback etc.) are set by the caller after NewAgent returns;
+	// closures evaluate them at call time, so they pick up the final values.
+	shellExec := func(cmd string) ToolResult {
+		return ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
+	}
+	a.registry = NewRegistry()
+	a.registry.Register(ReadFileTool())
+	a.registry.Register(WriteFileTool())
+	a.registry.Register(EditFileTool())
+	a.registry.Register(RunShellTool(shellExec))
+	a.registry.Register(PythonRuntimeTool(shellExec))
+	a.registry.Register(CompactContextTool(a.compactMessages))
+	a.apiTools = a.registry.Tools(config.AllowedTools...)
+
 	if config.SystemPrompt != "" {
 		a.msgs = append(a.msgs, Message{Role: "system", Content: config.SystemPrompt})
 	}
+
+	// Register default middleware.
+	client.Use(ContextUsageMiddleware(client.LastUsage))
+
 	return a, nil
+}
+
+// Use registers message middleware that runs before each API call.
+// Use this to inject metadata, transform messages, or add instrumentation.
+func (a *Agent) Use(mw ...MessageMiddleware) {
+	a.client.Use(mw...)
 }
 
 // Chat sends a user message and processes the complete turn.
@@ -84,34 +113,60 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 
 	a.msgs = append(a.msgs, Message{Role: "user", Content: input})
 
+	toolCallsSinceLastSummary := 0
 	for turns := 0; ; turns++ {
 		if turns >= maxChatTurns {
 			return "", ErrMaxTurnsExceeded
 		}
-		msg, err := a.client.ChatCompletion(ctx, a.msgs)
+		msg, err := a.client.ChatCompletionWithTools(ctx, a.msgs, a.apiTools)
 		if err != nil {
 			return "", err
 		}
 
-		a.msgs = append(a.msgs, *msg)
 		content := messageContent(msg)
-		if a.OnMessage != nil && strings.TrimSpace(content) != "" {
-			a.OnMessage(content)
-		}
 
-		// No tool calls = done
+		// No tool calls = done (unless empty, then nudge to continue)
 		if len(msg.ToolCalls) == 0 {
 			if content == "" {
+				// Model returned empty (e.g. after summary round). Nudge it to continue the task.
+				if last := lastAssistantContent(a.msgs); last != "" {
+					// Avoid infinite loop: if we already nudged and got empty again, return last content
+					const emptyNudge = "Your previous response was empty. Please continue: use tools to complete the task or provide your final response. Do not reply with empty content."
+					if !lastMessageIs(a.msgs, "user", emptyNudge) {
+						a.msgs = append(a.msgs, Message{Role: "user", Content: emptyNudge})
+						continue // retry in next iteration
+					}
+					return last, nil
+				}
+				a.msgs = append(a.msgs, *msg)
 				return "", ErrEmptyResponse
+			}
+			a.msgs = append(a.msgs, *msg)
+			if a.OnMessage != nil && strings.TrimSpace(content) != "" {
+				a.OnMessage(content)
 			}
 			return content, nil
 		}
+
+		// Cap: run at most remaining (cumulative across responses) until we hit MaxToolCallsPerTurn
+		toRun := msg.ToolCalls
+		if a.config.MaxToolCallsPerTurn > 0 {
+			remaining := a.config.MaxToolCallsPerTurn - toolCallsSinceLastSummary
+			if remaining <= 0 {
+				remaining = a.config.MaxToolCallsPerTurn // fresh after summary
+			}
+			if len(toRun) > remaining {
+				toRun = toRun[:remaining]
+			}
+			toolCallsSinceLastSummary += len(toRun)
+		}
+		hitCap := a.config.MaxToolCallsPerTurn > 0 && toolCallsSinceLastSummary >= a.config.MaxToolCallsPerTurn
 
 		// Execute tools and collect results
 		var toolResults []Message
 		cancelled := false
 
-		for _, tc := range msg.ToolCalls {
+		for i, tc := range toRun {
 			var args map[string]any
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 
@@ -121,38 +176,66 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 				break
 			}
 
-			// Execute tool with sandbox support for shell and python runtime
 			var result ToolResult
-			if tc.Function.Name == "run_shell" {
-				cmd, _ := args["command"].(string)
-				result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
-			} else if tc.Function.Name == "python_runtime" {
-				code, _ := args["code"].(string)
-				result = ExecuteShellWithSandbox(pythonCommand(code), a.OnSandboxFallback)
+			tool, ok := a.registry.Get(tc.Function.Name)
+			if !ok {
+				result = ToolResult{Success: false, Error: fmt.Errorf("unknown tool: %s", tc.Function.Name), Status: "fail: unknown tool"}
 			} else {
-				result = ExecuteTool(tc.Function.Name, args)
+				result = tool.Execute(args)
 			}
 
 			if a.OnToolDone != nil {
 				a.OnToolDone(tc.Function.Name, args, result)
 			}
 
-			// Append tool result message
+			out := result.Output
+			// Gentle nudge on last result when we hit the cap (like read_file truncation message)
+			if hitCap && i == len(toRun)-1 {
+				out = out + fmt.Sprintf("\n\n[You've used %d tool calls this round. Consider summarizing what you've learned before making more tool calls to save context.]", a.config.MaxToolCallsPerTurn)
+			}
 			toolResults = append(toolResults, Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    result.Output,
+				Content:    out,
 			})
 		}
 
-		// If cancelled, rollback to remove assistant message
+		// If cancelled, we never appended the assistant message; nothing to rollback
 		if cancelled {
-			a.msgs = a.msgs[:len(a.msgs)-1]
 			return "", nil
 		}
 
-		// Append all tool results
+		// Append assistant message (trimmed to toRun so tool_calls and results match)
+		assistantMsg := *msg
+		if len(toRun) < len(msg.ToolCalls) {
+			assistantMsg.ToolCalls = append([]ToolCall(nil), toRun...)
+		}
+		a.msgs = append(a.msgs, assistantMsg)
 		a.msgs = append(a.msgs, toolResults...)
+
+		// Summary round when we hit the cap: ask for summary, then compact and continue loop
+		if hitCap {
+			toolCallsSinceLastSummary = 0
+			prompt := fmt.Sprintf("You've used your tool call limit for this round (%d). Please briefly summarize what you learned from the results above (1–2 paragraphs). After your summary we'll continue and you can use more tools if needed. Reply with your summary only (no tool calls).", a.config.MaxToolCallsPerTurn)
+			a.msgs = append(a.msgs, Message{Role: "user", Content: prompt})
+			summaryMsg, err := a.client.ChatCompletionWithTools(ctx, a.msgs, a.apiTools)
+			if err != nil {
+				return "", err
+			}
+			a.msgs = append(a.msgs, *summaryMsg)
+			if summaryContent := messageContent(summaryMsg); a.OnMessage != nil && strings.TrimSpace(summaryContent) != "" {
+				a.OnMessage(summaryContent)
+			}
+			// Compact: replace raw tool calls and results with the summary to save context
+			// Keep [system, user(task)] + [assistant(summary)]; drop everything in between
+			prefixLen := 2 // system + initial user
+			if len(a.msgs) < prefixLen {
+				prefixLen = len(a.msgs)
+			}
+			summary := a.msgs[len(a.msgs)-1]
+			a.msgs = append(append([]Message{}, a.msgs[:prefixLen]...), summary)
+			// Continue loop; next turn can do more tool calls or return final answer
+		}
 	}
 }
 
@@ -161,11 +244,62 @@ func (a *Agent) Messages() []Message {
 	return a.msgs
 }
 
+// WarmModelUsageLimits preloads endpoint token limits for a model into the client cache.
+// Useful when switching models at runtime so response_usage calculations stay accurate.
+func (a *Agent) WarmModelUsageLimits(ctx context.Context, model string) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("agent client not initialized")
+	}
+	return a.client.WarmModelUsageLimits(ctx, model)
+}
+
 // Reset clears conversation history (keeps system prompt if configured).
 func (a *Agent) Reset() {
 	a.msgs = nil
 	if a.config.SystemPrompt != "" {
 		a.msgs = append(a.msgs, Message{Role: "system", Content: a.config.SystemPrompt})
+	}
+}
+
+// compactMessages replaces conversation history with a summary.
+// Keeps the system prompt and inserts the summary as a user message.
+// The caller (tool loop) appends the current turn's assistant+tool messages after.
+func (a *Agent) compactMessages(summary string) ToolResult {
+	if strings.TrimSpace(summary) == "" {
+		return ToolResult{
+			Success: false,
+			Output:  "compact_context requires a non-empty summary",
+			Status:  "fail: empty summary",
+			Error:   fmt.Errorf("compact_context: empty summary"),
+		}
+	}
+
+	// Count messages being replaced (everything after system prompt)
+	replaced := len(a.msgs)
+	if replaced <= 1 {
+		return ToolResult{
+			Success: true,
+			Output:  "Nothing to compact — conversation just started.",
+			Status:  "skipped: nothing to compact",
+		}
+	}
+
+	// Rebuild: keep system prompt, replace everything else with summary
+	var newMsgs []Message
+	if len(a.msgs) > 0 && a.msgs[0].Role == "system" {
+		newMsgs = append(newMsgs, a.msgs[0])
+		replaced-- // don't count system prompt
+	}
+	newMsgs = append(newMsgs, Message{
+		Role:    "user",
+		Content: "<conversation_summary>\n" + summary + "\n</conversation_summary>",
+	})
+	a.msgs = newMsgs
+
+	return ToolResult{
+		Success: true,
+		Output:  fmt.Sprintf("Context compacted: %d messages replaced with summary.", replaced),
+		Status:  fmt.Sprintf("compacted %d messages", replaced),
 	}
 }
 
@@ -203,7 +337,7 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 		if turns >= maxPreTaskTurns {
 			return fmt.Errorf("pretask %s: %w", task.Name, ErrMaxTurnsExceeded)
 		}
-		msg, err := a.client.ChatCompletion(ctx, taskMsgs)
+		msg, err := a.client.ChatCompletionWithTools(ctx, taskMsgs, a.apiTools)
 		if err != nil {
 			return err
 		}
@@ -235,16 +369,12 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 				break
 			}
 
-			// Execute tool with sandbox support for shell and python runtime
 			var result ToolResult
-			if tc.Function.Name == "run_shell" {
-				cmd, _ := args["command"].(string)
-				result = ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
-			} else if tc.Function.Name == "python_runtime" {
-				code, _ := args["code"].(string)
-				result = ExecuteShellWithSandbox(pythonCommand(code), a.OnSandboxFallback)
+			tool, ok := a.registry.Get(tc.Function.Name)
+			if !ok {
+				result = ToolResult{Success: false, Error: fmt.Errorf("unknown tool: %s", tc.Function.Name), Status: "fail: unknown tool"}
 			} else {
-				result = ExecuteTool(tc.Function.Name, args)
+				result = tool.Execute(args)
 			}
 
 			if a.OnToolDone != nil {
@@ -306,4 +436,30 @@ func messageContent(msg *Message) string {
 	default:
 		return ""
 	}
+}
+
+// lastAssistantContent returns the content of the most recent assistant message
+// that has non-empty content. Used when the model returns empty (e.g. after a summary round).
+func lastAssistantContent(msgs []Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			if c := messageContent(&msgs[i]); strings.TrimSpace(c) != "" {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+// lastMessageIs returns true if the last message has the given role and content.
+func lastMessageIs(msgs []Message, role, content string) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	m := &msgs[len(msgs)-1]
+	if m.Role != role {
+		return false
+	}
+	c, ok := m.Content.(string)
+	return ok && c == content
 }
