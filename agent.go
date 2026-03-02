@@ -44,8 +44,8 @@ type Agent struct {
 	// Return true to execute outside sandbox (requires approval), false to cancel.
 	OnSandboxFallback func(command string, reason string) bool
 
-	// OnContextUsage is called after each LLM response with the prompt usage percentage.
-	OnContextUsage func(pct float64)
+	// OnContextUsage is called after each LLM response with the prompt usage percentage and cumulative cost.
+	OnContextUsage func(pct float64, totalCost float64)
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -480,14 +480,24 @@ func lastMessageIs(msgs []Message, role, content string) bool {
 	return ok && c == content
 }
 
-// fireContextUsage calls OnContextUsage with the latest prompt usage percentage.
+// fireContextUsage calls OnContextUsage with the latest prompt usage percentage and cumulative cost.
 func (a *Agent) fireContextUsage() {
 	if a.OnContextUsage == nil {
 		return
 	}
 	usage := a.client.LastUsage()
-	if usage == nil || usage.PromptUsagePct == nil {
+	if usage == nil {
 		return
 	}
-	a.OnContextUsage(*usage.PromptUsagePct)
+	var pct, cost float64
+	if usage.PromptUsagePct != nil {
+		pct = *usage.PromptUsagePct
+	}
+	if usage.TotalSessionCost != nil {
+		cost = *usage.TotalSessionCost
+	}
+	if pct == 0 && cost == 0 {
+		return
+	}
+	a.OnContextUsage(pct, cost)
 }

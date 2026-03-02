@@ -34,6 +34,7 @@ type Client struct {
 	modelLimits   map[string]modelLimitCacheEntry
 
 	lastUsage   *ResponseUsage
+	totalCost   float64
 	middlewares []MessageMiddleware
 }
 
@@ -68,6 +69,8 @@ type ResponseUsage struct {
 	ProviderMatched     bool     `json:"provider_matched"`
 	LimitSource         string   `json:"limit_source,omitempty"`
 	LimitFetchedAt      string   `json:"limit_fetched_at,omitempty"`
+	TurnCost            *float64 `json:"turn_cost,omitempty"`
+	TotalSessionCost    *float64 `json:"total_session_cost,omitempty"`
 }
 
 type modelLimitCacheEntry struct {
@@ -376,6 +379,24 @@ func asInt64(v any) (int64, bool) {
 	return 0, false
 }
 
+func asFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		if f, err := n.Float64(); err == nil {
+			return f, true
+		}
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
 func isDefaultEndpoint(status any) bool {
 	if status == nil {
 		return false
@@ -442,6 +463,10 @@ func int64Ptr(v int64) *int64 {
 	return &value
 }
 
+func float64Ptr(v float64) *float64 {
+	return &v
+}
+
 func percentage(numerator *int64, denominator *int64) *float64 {
 	if numerator == nil || denominator == nil || *denominator <= 0 {
 		return nil
@@ -499,6 +524,24 @@ func (c *Client) buildResponseUsage(responseBody []byte, requestedModel string) 
 	}
 	if hasTotal {
 		result.TotalTokens = int64Ptr(totalTokens)
+	}
+
+	// Extract cost from cost_details if present.
+	if costMap, ok := asMap(usageMap["cost_details"]); ok {
+		var turnCost float64
+		if v, ok := asFloat64(costMap["upstream_inference_cost"]); ok {
+			turnCost = v
+		} else {
+			// Fall back to summing input + output costs.
+			inputCost, _ := asFloat64(costMap["upstream_inference_input_cost"])
+			outputCost, _ := asFloat64(costMap["upstream_inference_output_cost"])
+			turnCost = inputCost + outputCost
+		}
+		if turnCost > 0 {
+			result.TurnCost = float64Ptr(turnCost)
+			c.totalCost += turnCost
+			result.TotalSessionCost = float64Ptr(c.totalCost)
+		}
 	}
 
 	entry, ok := c.getModelLimitEntry(model)
