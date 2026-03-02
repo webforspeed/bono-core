@@ -43,6 +43,9 @@ type Agent struct {
 	// OnSandboxFallback is called when sandbox blocks a command.
 	// Return true to execute outside sandbox (requires approval), false to cancel.
 	OnSandboxFallback func(command string, reason string) bool
+
+	// OnContextUsage is called after each LLM response with the prompt usage percentage.
+	OnContextUsage func(pct float64)
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -122,6 +125,8 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
+		a.fireContextUsage()
 
 		content := messageContent(msg)
 
@@ -242,6 +247,17 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 // Messages returns the conversation history.
 func (a *Agent) Messages() []Message {
 	return a.msgs
+}
+
+// ModelName returns the current model identifier.
+func (a *Agent) ModelName() string {
+	return a.config.Model
+}
+
+// SetModel switches the model used for subsequent API calls.
+func (a *Agent) SetModel(model string) {
+	a.config.Model = model
+	a.client.config.Model = model
 }
 
 // WarmModelUsageLimits preloads endpoint token limits for a model into the client cache.
@@ -462,4 +478,16 @@ func lastMessageIs(msgs []Message, role, content string) bool {
 	}
 	c, ok := m.Content.(string)
 	return ok && c == content
+}
+
+// fireContextUsage calls OnContextUsage with the latest prompt usage percentage.
+func (a *Agent) fireContextUsage() {
+	if a.OnContextUsage == nil {
+		return
+	}
+	usage := a.client.LastUsage()
+	if usage == nil || usage.PromptUsagePct == nil {
+		return
+	}
+	a.OnContextUsage(*usage.PromptUsagePct)
 }
