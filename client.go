@@ -140,6 +140,12 @@ func (c *Client) LastUsage() *ResponseUsage {
 	return c.lastUsage
 }
 
+// ResetCost zeroes cumulative session cost and clears the last usage snapshot.
+func (c *Client) ResetCost() {
+	c.totalCost = 0
+	c.lastUsage = nil
+}
+
 func (c *Client) applyMiddleware(messages []Message) []Message {
 	for _, mw := range c.middlewares {
 		messages = mw(messages)

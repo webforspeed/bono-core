@@ -277,6 +277,11 @@ func (a *Agent) Reset() {
 	}
 }
 
+// ResetCost zeroes cumulative session cost and clears usage tracking.
+func (a *Agent) ResetCost() {
+	a.client.ResetCost()
+}
+
 // compactMessages replaces conversation history with a summary.
 // Keeps the system prompt and inserts the summary as a user message.
 // The caller (tool loop) appends the current turn's assistant+tool messages after.
