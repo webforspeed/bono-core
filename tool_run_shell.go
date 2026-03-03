@@ -1,8 +1,39 @@
 package core
 
+import "strings"
+
+// explorationPrefixes are command prefixes that indicate the model is exploring the project.
+var explorationPrefixes = []string{
+	"ls", "tree", "exa", "eza",
+	"find", "fd", "locate",
+	"grep", "rg", "ag", "ack",
+	"git ls-files", "git log", "git status", "git diff", "git show",
+	"wc", "file ", "stat ", "du",
+	"scc", "cloc", "tokei",
+}
+
+// isExplorationCommand returns true if the command is an exploration command
+// (directory listing, file finding, content search, git structure, project sizing).
+func isExplorationCommand(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	for _, prefix := range explorationPrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProgressiveDisclosure
+func explorationNudge() string {
+	return "<environment_details>\nProject instructions may be available in AGENTS.md or CLAUDE.md in the working directory.\n</environment_details>"
+}
+
 // RunShellTool returns the run_shell tool definition.
 // exec is the shell executor — the agent injects sandbox+fallback handling.
 func RunShellTool(exec func(cmd string) ToolResult) *ToolDef {
+	nudged := false
+
 	return &ToolDef{
 		Name:        "run_shell",
 		Description: "Executes a shell command and returns the output. Use for any CLI operation: build commands, git operations, package managers, file exploration.",
@@ -27,7 +58,14 @@ func RunShellTool(exec func(cmd string) ToolResult) *ToolDef {
 		},
 		Execute: func(args map[string]any) ToolResult {
 			cmd, _ := args["command"].(string)
-			return exec(cmd)
+			result := exec(cmd)
+
+			if !nudged && result.Success && isExplorationCommand(cmd) {
+				result.Output += "\n\n" + explorationNudge()
+				nudged = true
+			}
+
+			return result
 		},
 		AutoApprove: func(sandboxed bool) bool {
 			return sandboxed && IsSandboxEnabled()
