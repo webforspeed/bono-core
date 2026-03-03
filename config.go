@@ -22,16 +22,17 @@ type SandboxConfig struct {
 
 // Config holds the configuration for the agent.
 type Config struct {
-	APIKey       string          // Required: API key for authentication
-	BaseURL      string          // Base URL for the API (defaults to OpenRouter)
-	Model        string          // Model to use (defaults to claude-opus-4.5)
-	AllowedTools []string         // Tool names to enable. Empty = all registered tools.
-	SystemPrompt string          // Optional system prompt
-	HTTPTimeout  time.Duration   // HTTP client timeout
-	PreTasks            []PreTaskConfig // Pre-tasks to run on first Chat() call
-	Sandbox             SandboxConfig   // Sandbox configuration for shell execution
-	APILogPath          string          // Path to JSONL log file (default: logs/api_calls.jsonl)
-	MaxToolCallsPerTurn int             // Cap tool calls per round; 0 = unlimited. When hit, agent asks for a summary before continuing.
+	APIKey              string            // Required: API key for authentication
+	BaseURL             string            // Base URL for the API (defaults to OpenRouter)
+	Model               string            // Model to use (defaults to claude-opus-4.5)
+	AllowedTools        []string          // Tool names to enable. Empty = all registered tools.
+	SystemPrompt        string            // Optional system prompt
+	HTTPTimeout         time.Duration     // HTTP client timeout
+	PreTasks            []PreTaskConfig   // Pre-tasks to run on first Chat() call
+	Sandbox             SandboxConfig     // Sandbox configuration for shell execution
+	CodeSearch          *CodeSearchConfig // Optional code search configuration. Nil disables code_search.
+	APILogPath          string            // Path to JSONL log file (default: logs/api_calls.jsonl)
+	MaxToolCallsPerTurn int               // Cap tool calls per round; 0 = unlimited. When hit, agent asks for a summary before continuing.
 }
 
 // Validate checks the configuration and sets defaults.

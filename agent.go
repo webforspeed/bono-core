@@ -14,12 +14,14 @@ const (
 
 // Agent orchestrates conversations with an LLM and executes tools.
 type Agent struct {
-	config       Config
-	client       *Client
-	registry     *Registry
-	apiTools     []Tool // resolved from registry, filtered by AllowedTools
-	msgs         []Message
-	preTasksDone bool // tracks if pre-tasks have executed
+	config        Config
+	client        *Client
+	registry      *Registry
+	apiTools      []Tool // resolved from registry, filtered by AllowedTools
+	msgs          []Message
+	preTasksDone  bool // tracks if pre-tasks have executed
+	codeSearch    *CodeSearchService
+	codeSearchErr error
 
 	// Optional hooks - nil means default behavior (auto-execute, no output)
 
@@ -83,6 +85,21 @@ func NewAgent(config Config) (*Agent, error) {
 	a.registry.Register(RunShellTool(shellExec))
 	a.registry.Register(PythonRuntimeTool(shellExec))
 	a.registry.Register(CompactContextTool(a.compactMessages))
+	if config.CodeSearch != nil {
+		serviceCfg := *config.CodeSearch
+		serviceCfg.APIKey = config.APIKey
+		if serviceCfg.BaseURL == "" {
+			serviceCfg.BaseURL = config.BaseURL
+		}
+		service, err := NewCodeSearchService(serviceCfg)
+		if err != nil {
+			a.codeSearchErr = err
+		} else {
+			a.codeSearch = service
+			a.registry.Register(service.Tool())
+		}
+	}
+
 	a.apiTools = a.registry.Tools(config.AllowedTools...)
 
 	if config.SystemPrompt != "" {
@@ -93,6 +110,37 @@ func NewAgent(config Config) (*Agent, error) {
 	client.Use(ContextUsageMiddleware(client.LastUsage))
 
 	return a, nil
+}
+
+// Close releases resources owned by the agent.
+func (a *Agent) Close() error {
+	if a == nil || a.codeSearch == nil {
+		return nil
+	}
+	return a.codeSearch.Close()
+}
+
+// CodeSearchService returns the initialized code-search service, if available.
+func (a *Agent) CodeSearchService() *CodeSearchService {
+	if a == nil {
+		return nil
+	}
+	return a.codeSearch
+}
+
+// CodeSearchInitError returns initialization failure when code search was configured but unavailable.
+func (a *Agent) CodeSearchInitError() error {
+	if a == nil {
+		return nil
+	}
+	return a.codeSearchErr
+}
+
+// RegisterTool adds a tool to the agent's registry after creation.
+// Use this for optional tools (like code_search) that aren't part of the default set.
+func (a *Agent) RegisterTool(t *ToolDef) {
+	a.registry.Register(t)
+	a.apiTools = a.registry.Tools(a.config.AllowedTools...)
 }
 
 // Use registers message middleware that runs before each API call.
