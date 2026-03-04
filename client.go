@@ -34,6 +34,7 @@ type Client struct {
 	modelLimits   map[string]modelLimitCacheEntry
 
 	lastUsage   *ResponseUsage
+	lastModel   string
 	totalCost   float64
 	middlewares []MessageMiddleware
 }
@@ -138,6 +139,11 @@ func (c *Client) Use(mw ...MessageMiddleware) {
 // LastUsage returns the ResponseUsage from the most recent API call, or nil.
 func (c *Client) LastUsage() *ResponseUsage {
 	return c.lastUsage
+}
+
+// LastModel returns the most recent response model identifier, or empty if unavailable.
+func (c *Client) LastModel() string {
+	return c.lastModel
 }
 
 // ResetCost zeroes cumulative session cost and clears the last usage snapshot.
@@ -620,6 +626,11 @@ func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message
 			return nil, &APIError{StatusCode: llmErr.StatusCode, Body: body}
 		}
 		return nil, fmt.Errorf("llm request: %w", err)
+	}
+
+	c.lastModel = strings.TrimSpace(resp.Model)
+	if c.lastModel == "" {
+		c.lastModel = c.config.Model
 	}
 
 	return llmResponseToMessage(resp), nil

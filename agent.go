@@ -50,6 +50,9 @@ type Agent struct {
 
 	// OnContextUsage is called after each LLM response with the prompt usage percentage and cumulative cost.
 	OnContextUsage func(pct float64, totalCost float64)
+
+	// OnResponseModel is called after each LLM response with the model identifier actually used.
+	OnResponseModel func(model string)
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -216,6 +219,7 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 			return "", err
 		}
 
+		a.fireResponseModel()
 		a.fireContextUsage()
 
 		content := messageContent(msg)
@@ -317,6 +321,8 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			a.fireResponseModel()
+			a.fireContextUsage()
 			a.msgs = append(a.msgs, *summaryMsg)
 			if summaryContent := messageContent(summaryMsg); a.OnMessage != nil && strings.TrimSpace(summaryContent) != "" {
 				a.OnMessage(summaryContent)
@@ -452,6 +458,8 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 		if err != nil {
 			return err
 		}
+		a.fireResponseModel()
+		a.fireContextUsage()
 		taskMsgs = append(taskMsgs, *msg)
 		content := messageContent(msg)
 		if a.OnMessage != nil && strings.TrimSpace(content) != "" {
@@ -595,4 +603,15 @@ func (a *Agent) fireContextUsage() {
 		return
 	}
 	a.OnContextUsage(pct, cost)
+}
+
+func (a *Agent) fireResponseModel() {
+	if a.OnResponseModel == nil {
+		return
+	}
+	model := strings.TrimSpace(a.client.LastModel())
+	if model == "" {
+		return
+	}
+	a.OnResponseModel(model)
 }
