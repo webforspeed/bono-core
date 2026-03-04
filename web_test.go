@@ -120,8 +120,8 @@ func TestFormatSearchResult(t *testing.T) {
 	if !strings.Contains(tr.Output, "WebFetch") {
 		t.Error("hint should reference WebFetch")
 	}
-	if !strings.Contains(tr.Output, "<prefer_answer/>") {
-		t.Error("hint should reference prefer_answer tag")
+	if !strings.Contains(tr.Output, "mode=\"answer\"") {
+		t.Error("hint should reference mode=\"answer\"")
 	}
 	if tr.Status != "2 results" {
 		t.Errorf("unexpected status: %s", tr.Status)
@@ -142,8 +142,8 @@ func TestFormatAnswerResult(t *testing.T) {
 	if !strings.Contains(tr.Output, "<hint>") {
 		t.Error("missing hint tag")
 	}
-	if !strings.Contains(tr.Output, "<prefer_search/>") {
-		t.Error("hint should reference prefer_search tag")
+	if !strings.Contains(tr.Output, "mode=\"search\"") {
+		t.Error("hint should reference mode=\"search\"")
 	}
 	if tr.Status != "answered" {
 		t.Errorf("unexpected status: %s", tr.Status)
