@@ -238,10 +238,10 @@ func TestSendMessage_ToolResultConversion(t *testing.T) {
 		json.Unmarshal(body, &capturedReq)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"id":      "msg_789",
-			"type":    "message",
-			"role":    "assistant",
-			"content": []map[string]any{{"type": "text", "text": "It's sunny in London."}},
+			"id":          "msg_789",
+			"type":        "message",
+			"role":        "assistant",
+			"content":     []map[string]any{{"type": "text", "text": "It's sunny in London."}},
 			"model":       "anthropic/claude-sonnet-4-20250514",
 			"stop_reason": "end_turn",
 			"usage":       map[string]any{"input_tokens": 30, "output_tokens": 10},
@@ -342,10 +342,10 @@ func TestSendMessage_ToolResultWithError(t *testing.T) {
 		json.Unmarshal(body, &capturedReq)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"id":      "msg_err",
-			"type":    "message",
-			"role":    "assistant",
-			"content": []map[string]any{{"type": "text", "text": "Tool failed."}},
+			"id":          "msg_err",
+			"type":        "message",
+			"role":        "assistant",
+			"content":     []map[string]any{{"type": "text", "text": "Tool failed."}},
 			"model":       "anthropic/claude-sonnet-4-20250514",
 			"stop_reason": "end_turn",
 			"usage":       map[string]any{"input_tokens": 5, "output_tokens": 5},
@@ -481,10 +481,10 @@ func TestSendMessage_OptionalParams(t *testing.T) {
 		json.Unmarshal(body, &capturedReq)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"id":      "msg_opt",
-			"type":    "message",
-			"role":    "assistant",
-			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"id":          "msg_opt",
+			"type":        "message",
+			"role":        "assistant",
+			"content":     []map[string]any{{"type": "text", "text": "ok"}},
 			"model":       "test",
 			"stop_reason": "end_turn",
 			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 1},
@@ -529,10 +529,10 @@ func TestSendMessage_NoOptionalHeaders(t *testing.T) {
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"id":      "msg_nh",
-			"type":    "message",
-			"role":    "assistant",
-			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"id":          "msg_nh",
+			"type":        "message",
+			"role":        "assistant",
+			"content":     []map[string]any{{"type": "text", "text": "ok"}},
 			"model":       "test",
 			"stop_reason": "end_turn",
 			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 1},
@@ -559,10 +559,10 @@ func TestSendMessage_ToolNilParameters(t *testing.T) {
 		json.Unmarshal(body, &capturedReq)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"id":      "msg_tn",
-			"type":    "message",
-			"role":    "assistant",
-			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"id":          "msg_tn",
+			"type":        "message",
+			"role":        "assistant",
+			"content":     []map[string]any{{"type": "text", "text": "ok"}},
 			"model":       "test",
 			"stop_reason": "end_turn",
 			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 1},

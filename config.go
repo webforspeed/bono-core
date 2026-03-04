@@ -20,6 +20,19 @@ type SandboxConfig struct {
 	FallbackOutsideSandbox bool     // Allow approval-based rerun outside sandbox if blocked (default true)
 }
 
+// WebConfig configures the web search and fetch tools.
+// Nil in Config.Web disables web tools entirely.
+type WebConfig struct {
+	APIKey       string // OpenRouter API key (inherited from main Config.APIKey if empty)
+	BaseURL      string // API base URL (inherited from main Config.BaseURL if empty)
+	Model        string // Model for answer/classification/fetch (default: "perplexity/sonar")
+	SearchModel  string // Model for search with web plugin (inherited from main Config.Model if empty)
+	SearchEngine    string // Web plugin engine: "exa" or "native" (default: "exa")
+	MaxResults      int    // Max search results from web plugin (default: 5)
+	APILogPath      string // Path to JSONL log file (inherited from main Config.APILogPath if empty)
+	ClassifierModel string // Model for query routing (default: "openai/gpt-oss-20b")
+}
+
 // Config holds the configuration for the agent.
 type Config struct {
 	APIKey              string            // Required: API key for authentication
@@ -31,6 +44,7 @@ type Config struct {
 	PreTasks            []PreTaskConfig   // Pre-tasks to run on first Chat() call
 	Sandbox             SandboxConfig     // Sandbox configuration for shell execution
 	CodeSearch          *CodeSearchConfig // Optional code search configuration. Nil disables code_search.
+	Web                 *WebConfig        // Optional web search/fetch configuration. Nil disables web tools.
 	APILogPath          string            // Path to JSONL log file (default: logs/api_calls.jsonl)
 	MaxToolCallsPerTurn int               // Cap tool calls per round; 0 = unlimited. When hit, agent asks for a summary before continuing.
 }

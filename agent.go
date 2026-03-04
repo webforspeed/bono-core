@@ -22,6 +22,8 @@ type Agent struct {
 	preTasksDone  bool // tracks if pre-tasks have executed
 	codeSearch    *CodeSearchService
 	codeSearchErr error
+	web           *WebService
+	webErr        error
 
 	// Optional hooks - nil means default behavior (auto-execute, no output)
 
@@ -99,6 +101,30 @@ func NewAgent(config Config) (*Agent, error) {
 			a.registry.Register(service.Tool())
 		}
 	}
+	if config.Web != nil {
+		webCfg := *config.Web
+		if webCfg.APIKey == "" {
+			webCfg.APIKey = config.APIKey
+		}
+		if webCfg.BaseURL == "" {
+			webCfg.BaseURL = config.BaseURL
+		}
+		if webCfg.SearchModel == "" {
+			webCfg.SearchModel = config.Model
+		}
+		if webCfg.APILogPath == "" {
+			webCfg.APILogPath = config.APILogPath
+		}
+		webSvc, err := NewWebService(webCfg)
+		if err != nil {
+			a.webErr = err
+		} else {
+			a.web = webSvc
+			for _, t := range webSvc.Tools() {
+				a.registry.Register(t)
+			}
+		}
+	}
 
 	a.apiTools = a.registry.Tools(config.AllowedTools...)
 
@@ -134,6 +160,22 @@ func (a *Agent) CodeSearchInitError() error {
 		return nil
 	}
 	return a.codeSearchErr
+}
+
+// WebService returns the initialized web service, if available.
+func (a *Agent) WebService() *WebService {
+	if a == nil {
+		return nil
+	}
+	return a.web
+}
+
+// WebInitError returns initialization failure when web tools were configured but unavailable.
+func (a *Agent) WebInitError() error {
+	if a == nil {
+		return nil
+	}
+	return a.webErr
 }
 
 // RegisterTool adds a tool to the agent's registry after creation.
