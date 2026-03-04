@@ -47,7 +47,7 @@ func ContextUsageMiddleware(usageFn func() *ResponseUsage) MessageMiddleware {
 		return out
 	}
 }
-
+// ProgressiveDisclosure
 func formatContextUsage(u *ResponseUsage) string {
 	if u == nil || u.PromptUsagePct == nil {
 		return ""

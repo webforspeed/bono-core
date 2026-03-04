@@ -47,6 +47,7 @@ type Config struct {
 	Web                 *WebConfig        // Optional web search/fetch configuration. Nil disables web tools.
 	APILogPath          string            // Path to JSONL log file (default: logs/api_calls.jsonl)
 	MaxToolCallsPerTurn int               // Cap tool calls per round; 0 = unlimited. When hit, agent asks for a summary before continuing.
+	ReasoningEffort     string            // Reasoning effort level (e.g., "high", "medium", "low"). Empty = not sent.
 }
 
 // Validate checks the configuration and sets defaults.

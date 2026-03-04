@@ -55,6 +55,7 @@ func ReadFileTool() *ToolDef {
 }
 
 // ExecuteReadFile reads a file with optional line range and truncation.
+// ProgressiveDisclosure
 func ExecuteReadFile(path string, lineStart, lineEnd, maxLines int, showLineNumbers bool) ToolResult {
 	content, err := os.ReadFile(path)
 	if err != nil {
