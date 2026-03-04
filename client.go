@@ -603,10 +603,19 @@ func (c *Client) ChatCompletion(ctx context.Context, messages []Message) (*Messa
 
 // ChatCompletionWithTools sends messages with a custom tool set.
 // All LLM inference calls are routed through the llm.Provider.
-func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
-	req := buildLLMRequest(c.config.Model, c.applyMiddleware(messages), tools)
+func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message, tools []Tool, opts ...llmRequestOption) (*Message, error) {
+	req := buildLLMRequest(c.config.Model, c.applyMiddleware(messages), tools, opts...)
 
 	resp, err := c.provider.SendMessage(ctx, req)
+
+	// Warm model limits for the actual response model (cached after first call per model).
+	if resp != nil {
+		if model := strings.TrimSpace(resp.Model); model != "" {
+			warmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = c.WarmModelUsageLimits(warmCtx, model)
+			cancel()
+		}
+	}
 
 	// Log and track usage from captured HTTP data.
 	captured := c.transport.lastCapture()
@@ -627,6 +636,123 @@ func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message
 		}
 		return nil, fmt.Errorf("llm request: %w", err)
 	}
+
+	c.lastModel = strings.TrimSpace(resp.Model)
+	if c.lastModel == "" {
+		c.lastModel = c.config.Model
+	}
+
+	return llmResponseToMessage(resp), nil
+}
+
+// llmRequestOption customizes an llm.Request before sending.
+type llmRequestOption func(*llm.Request)
+
+func withReasoningEffort(effort string) llmRequestOption {
+	return func(req *llm.Request) {
+		req.ReasoningEffort = effort
+	}
+}
+
+// ChatCompletionWithToolsStream sends messages with streaming enabled.
+// Delta callbacks are invoked for each content/reasoning fragment.
+// Falls back to non-streaming if the provider doesn't support streaming.
+func (c *Client) ChatCompletionWithToolsStream(
+	ctx context.Context,
+	messages []Message,
+	tools []Tool,
+	onContentDelta func(string),
+	onReasoningDelta func(string),
+	opts ...llmRequestOption,
+) (*Message, error) {
+	streamProvider, ok := c.provider.(llm.StreamProvider)
+	if !ok {
+		return c.ChatCompletionWithTools(ctx, messages, tools, opts...)
+	}
+
+	req := buildLLMRequest(c.config.Model, c.applyMiddleware(messages), tools, opts...)
+
+	start := time.Now()
+	stream, err := streamProvider.SendMessageStream(ctx, req)
+
+	captured := c.transport.lastCapture()
+	if err != nil {
+		c.logFromCapture(captured, err)
+		if errors.Is(err, llm.ErrNoChoices) {
+			return nil, ErrNoChoices
+		}
+		var llmErr *llm.APIError
+		if errors.As(err, &llmErr) {
+			body := llmErr.Message
+			if body == "" {
+				body = llmErr.RawBody
+			}
+			return nil, &APIError{StatusCode: llmErr.StatusCode, Body: body}
+		}
+		return nil, fmt.Errorf("llm request: %w", err)
+	}
+
+	// Consume the stream, firing delta callbacks.
+	var resp *llm.Response
+	for {
+		evt, ok := stream.Next()
+		if !ok {
+			break
+		}
+		if evt.ContentDelta != "" && onContentDelta != nil {
+			onContentDelta(evt.ContentDelta)
+		}
+		if evt.ReasoningDelta != "" && onReasoningDelta != nil {
+			onReasoningDelta(evt.ReasoningDelta)
+		}
+		if evt.Response != nil {
+			resp = evt.Response
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		c.logFromCapture(captured, err)
+		return nil, fmt.Errorf("llm stream: %w", err)
+	}
+
+	if resp == nil {
+		c.logFromCapture(captured, llm.ErrEmptyResponse)
+		return nil, ErrEmptyResponse
+	}
+
+	// Reconstruct a synthetic response body for logging/usage tracking.
+	// Use raw usage JSON from the SSE stream to preserve cost_details.
+	var usageData any
+	if len(resp.RawUsage) > 0 {
+		var raw any
+		if json.Unmarshal(resp.RawUsage, &raw) == nil {
+			usageData = raw
+		}
+	}
+	if usageData == nil {
+		usageData = map[string]int{
+			"prompt_tokens":     resp.Usage.InputTokens,
+			"completion_tokens": resp.Usage.OutputTokens,
+			"total_tokens":      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		}
+	}
+	syntheticBody, _ := json.Marshal(map[string]any{
+		"id":    resp.ID,
+		"model": resp.Model,
+		"usage": usageData,
+	})
+	c.transport.completeStreamCapture(syntheticBody, time.Since(start))
+
+	// Warm model limits for the actual response model so buildResponseUsage
+	// can compute context percentages. Cached after first call per model.
+	if model := strings.TrimSpace(resp.Model); model != "" {
+		warmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = c.WarmModelUsageLimits(warmCtx, model)
+		cancel()
+	}
+
+	captured = c.transport.lastCapture()
+	c.logFromCapture(captured, nil)
 
 	c.lastModel = strings.TrimSpace(resp.Model)
 	if c.lastModel == "" {
@@ -675,8 +801,11 @@ func (c *Client) logFromCapture(captured *capturedRoundTrip, callErr error) {
 // buildLLMRequest converts core messages + tools into an llm.Request.
 // System messages are extracted to llm.Request.System.
 // Consecutive tool-role messages are grouped into a single llm.Message with ToolResults.
-func buildLLMRequest(model string, messages []Message, tools []Tool) *llm.Request {
+func buildLLMRequest(model string, messages []Message, tools []Tool, opts ...llmRequestOption) *llm.Request {
 	req := &llm.Request{Model: model}
+	for _, opt := range opts {
+		opt(req)
+	}
 
 	for _, msg := range messages {
 		switch msg.Role {
@@ -813,6 +942,7 @@ type capturedRoundTrip struct {
 	StatusCode      int
 	Duration        time.Duration
 	Error           error
+	IsStreaming     bool // true for SSE responses — body not captured upfront
 }
 
 func (t *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -833,15 +963,21 @@ func (t *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	captured.Error = err
 
 	if resp != nil {
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			captured.Error = readErr
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(body))
 		captured.ResponseHeaders = resp.Header.Clone()
-		captured.ResponseBody = body
 		captured.StatusCode = resp.StatusCode
+
+		// For SSE streaming responses, don't buffer the body — let the caller consume it.
+		if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+			captured.IsStreaming = true
+		} else {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				captured.Error = readErr
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			captured.ResponseBody = body
+		}
 	}
 
 	t.mu.Lock()
@@ -855,4 +991,14 @@ func (t *capturingTransport) lastCapture() *capturedRoundTrip {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.last
+}
+
+// completeStreamCapture fills in the response body for a streaming capture after the stream is consumed.
+func (t *capturingTransport) completeStreamCapture(responseBody []byte, duration time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.last != nil && t.last.IsStreaming {
+		t.last.ResponseBody = responseBody
+		t.last.Duration = duration
+	}
 }

@@ -50,15 +50,16 @@ type Plugin struct {
 
 // Request holds the parameters for a SendMessage call.
 type Request struct {
-	Model         string
-	MaxTokens     int
-	System        string
-	Messages      []Message
-	Tools         []Tool
-	Temperature   *float64
-	TopP          *float64
-	StopSequences []string
-	Plugins       []Plugin // OpenRouter plugins (e.g., web search).
+	Model           string
+	MaxTokens       int
+	System          string
+	Messages        []Message
+	Tools           []Tool
+	Temperature     *float64
+	TopP            *float64
+	StopSequences   []string
+	Plugins         []Plugin // OpenRouter plugins (e.g., web search).
+	ReasoningEffort string   // Reasoning effort level (e.g., "high", "medium", "low"). Empty = not sent.
 }
 
 // Message represents a single message in the conversation history.
@@ -103,11 +104,13 @@ type Citation struct {
 type Response struct {
 	ID         string
 	Content    string     // Aggregated text from all text content blocks.
+	Reasoning  string     // Reasoning/thinking text (if model supports it).
 	ToolCalls  []ToolCall // Tool calls requested by the model.
 	Citations  []Citation // URL citations (e.g., from web search plugin).
 	StopReason StopReason
 	Model      string
 	Usage      Usage
+	RawUsage   json.RawMessage // Raw usage JSON from API (preserved for cost extraction in streaming).
 }
 
 // Usage holds token usage information.
@@ -516,14 +519,19 @@ func (c *CompletionsClient) SendMessage(ctx context.Context, req *Request) (*Res
 // --- Chat Completions wire format types ---
 
 type completionsRequest struct {
-	Model       string               `json:"model"`
-	Messages    []completionsMessage `json:"messages"`
-	MaxTokens   *int                 `json:"max_tokens,omitempty"`
-	Temperature *float64             `json:"temperature,omitempty"`
-	TopP        *float64             `json:"top_p,omitempty"`
-	Stop        []string             `json:"stop,omitempty"`
-	Tools       []completionsTool    `json:"tools,omitempty"`
-	Plugins     []Plugin             `json:"plugins,omitempty"`
+	Model       string                `json:"model"`
+	Messages    []completionsMessage  `json:"messages"`
+	MaxTokens   *int                  `json:"max_tokens,omitempty"`
+	Temperature *float64              `json:"temperature,omitempty"`
+	TopP        *float64              `json:"top_p,omitempty"`
+	Stop        []string              `json:"stop,omitempty"`
+	Tools       []completionsTool     `json:"tools,omitempty"`
+	Plugins     []Plugin              `json:"plugins,omitempty"`
+	Reasoning   *completionsReasoning `json:"reasoning,omitempty"`
+}
+
+type completionsReasoning struct {
+	Effort string `json:"effort"`
 }
 
 type completionsMessage struct {
@@ -573,6 +581,7 @@ type completionsChoice struct {
 type completionsRespMsg struct {
 	Role        string                  `json:"role"`
 	Content     *string                 `json:"content"`
+	Reasoning   *string                 `json:"reasoning,omitempty"`
 	ToolCalls   []completionsToolCall   `json:"tool_calls,omitempty"`
 	Annotations []completionsAnnotation `json:"annotations,omitempty"`
 }
@@ -631,6 +640,10 @@ func (c *CompletionsClient) buildWireRequest(req *Request) completionsRequest {
 	}
 
 	wireReq.Plugins = req.Plugins
+
+	if req.ReasoningEffort != "" {
+		wireReq.Reasoning = &completionsReasoning{Effort: req.ReasoningEffort}
+	}
 
 	return wireReq
 }
@@ -706,6 +719,10 @@ func (r *completionsResponse) toResponse() (*Response, error) {
 
 	if choice.Message.Content != nil {
 		resp.Content = *choice.Message.Content
+	}
+
+	if choice.Message.Reasoning != nil {
+		resp.Reasoning = *choice.Message.Reasoning
 	}
 
 	if choice.FinishReason != nil {

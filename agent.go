@@ -53,6 +53,13 @@ type Agent struct {
 
 	// OnResponseModel is called after each LLM response with the model identifier actually used.
 	OnResponseModel func(model string)
+
+	// OnContentDelta is called for each text content fragment during streaming.
+	// If set, enables streaming mode. If nil, responses are buffered (non-streaming).
+	OnContentDelta func(delta string)
+
+	// OnReasoningDelta is called for each reasoning text fragment during streaming.
+	OnReasoningDelta func(delta string)
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -214,7 +221,7 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 		if turns >= maxChatTurns {
 			return "", ErrMaxTurnsExceeded
 		}
-		msg, err := a.client.ChatCompletionWithTools(ctx, a.msgs, a.apiTools)
+		msg, err := a.chatCompletion(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -317,7 +324,7 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 			toolCallsSinceLastSummary = 0
 			prompt := fmt.Sprintf("You've used your tool call limit for this round (%d). Please briefly summarize what you learned from the results above (1–2 paragraphs). After your summary we'll continue and you can use more tools if needed. Reply with your summary only (no tool calls).", a.config.MaxToolCallsPerTurn)
 			a.msgs = append(a.msgs, Message{Role: "user", Content: prompt})
-			summaryMsg, err := a.client.ChatCompletionWithTools(ctx, a.msgs, a.apiTools)
+			summaryMsg, err := a.chatCompletion(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -340,6 +347,23 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 	}
 }
 
+// chatCompletion dispatches to streaming or non-streaming based on whether delta hooks are set.
+func (a *Agent) chatCompletion(ctx context.Context) (*Message, error) {
+	var opts []llmRequestOption
+	if a.config.ReasoningEffort != "" {
+		opts = append(opts, withReasoningEffort(a.config.ReasoningEffort))
+	}
+
+	if a.OnContentDelta != nil {
+		return a.client.ChatCompletionWithToolsStream(
+			ctx, a.msgs, a.apiTools,
+			a.OnContentDelta, a.OnReasoningDelta,
+			opts...,
+		)
+	}
+	return a.client.ChatCompletionWithTools(ctx, a.msgs, a.apiTools, opts...)
+}
+
 // Messages returns the conversation history.
 func (a *Agent) Messages() []Message {
 	return a.msgs
@@ -354,6 +378,17 @@ func (a *Agent) ModelName() string {
 func (a *Agent) SetModel(model string) {
 	a.config.Model = model
 	a.client.config.Model = model
+}
+
+// SetReasoningEffort sets the reasoning effort level for subsequent API calls.
+// Valid values: "xhigh", "high", "medium", "low", "minimal", "none", "" (disabled).
+func (a *Agent) SetReasoningEffort(effort string) {
+	a.config.ReasoningEffort = effort
+}
+
+// ReasoningEffort returns the current reasoning effort level.
+func (a *Agent) ReasoningEffort() string {
+	return a.config.ReasoningEffort
 }
 
 // WarmModelUsageLimits preloads endpoint token limits for a model into the client cache.
