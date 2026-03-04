@@ -25,9 +25,9 @@ import (
 // concerns (logging, middleware, model-limit tracking) stay here.
 type Client struct {
 	config     Config
-	httpClient *http.Client         // for non-LLM calls (model limits)
-	provider   llm.Provider         // routes LLM inference calls
-	transport  *capturingTransport  // captures raw HTTP data for logging
+	httpClient *http.Client        // for non-LLM calls (model limits)
+	provider   llm.Provider        // routes LLM inference calls
+	transport  *capturingTransport // captures raw HTTP data for logging
 	logPath    string
 
 	modelLimitsMu sync.RWMutex
@@ -275,8 +275,13 @@ func (c *Client) getModelLimitEntry(model string) (modelLimitCacheEntry, bool) {
 
 // logAPICall appends an API call entry to the JSONL log file.
 func (c *Client) logAPICall(entry APILogEntry) {
-	os.MkdirAll(filepath.Dir(c.logPath), 0755)
-	f, err := os.OpenFile(c.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	writeLogEntry(c.logPath, entry)
+}
+
+// writeLogEntry appends an APILogEntry as a JSON line to path.
+func writeLogEntry(path string, entry APILogEntry) {
+	os.MkdirAll(filepath.Dir(path), 0755)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}

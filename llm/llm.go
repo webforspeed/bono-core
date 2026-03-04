@@ -41,6 +41,14 @@ const (
 )
 
 // Request holds the parameters for a SendMessage call.
+// Plugin configures an OpenRouter plugin (e.g., web search).
+type Plugin struct {
+	ID         string `json:"id"`
+	MaxResults int    `json:"max_results,omitempty"`
+	Engine     string `json:"engine,omitempty"`
+}
+
+// Request holds the parameters for a SendMessage call.
 type Request struct {
 	Model         string
 	MaxTokens     int
@@ -50,6 +58,7 @@ type Request struct {
 	Temperature   *float64
 	TopP          *float64
 	StopSequences []string
+	Plugins       []Plugin // OpenRouter plugins (e.g., web search).
 }
 
 // Message represents a single message in the conversation history.
@@ -84,11 +93,18 @@ type Tool struct {
 	Parameters  map[string]any // JSON Schema object
 }
 
+// Citation represents a URL citation from web search or other sources.
+type Citation struct {
+	URL   string
+	Title string
+}
+
 // Response holds the model's response.
 type Response struct {
 	ID         string
 	Content    string     // Aggregated text from all text content blocks.
 	ToolCalls  []ToolCall // Tool calls requested by the model.
+	Citations  []Citation // URL citations (e.g., from web search plugin).
 	StopReason StopReason
 	Model      string
 	Usage      Usage
@@ -215,14 +231,14 @@ func (c *MessagesClient) SendMessage(ctx context.Context, req *Request) (*Respon
 // --- Wire format types (unexported) ---
 
 type messagesRequest struct {
-	Model         string              `json:"model"`
-	MaxTokens     int                 `json:"max_tokens"`
-	Messages      []messagesMessage   `json:"messages"`
-	System        string              `json:"system,omitempty"`
-	Tools         []messagesTool      `json:"tools,omitempty"`
-	Temperature   *float64            `json:"temperature,omitempty"`
-	TopP          *float64            `json:"top_p,omitempty"`
-	StopSequences []string            `json:"stop_sequences,omitempty"`
+	Model         string            `json:"model"`
+	MaxTokens     int               `json:"max_tokens"`
+	Messages      []messagesMessage `json:"messages"`
+	System        string            `json:"system,omitempty"`
+	Tools         []messagesTool    `json:"tools,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	TopP          *float64          `json:"top_p,omitempty"`
+	StopSequences []string          `json:"stop_sequences,omitempty"`
 }
 
 type messagesMessage struct {
@@ -500,26 +516,27 @@ func (c *CompletionsClient) SendMessage(ctx context.Context, req *Request) (*Res
 // --- Chat Completions wire format types ---
 
 type completionsRequest struct {
-	Model       string                `json:"model"`
-	Messages    []completionsMessage  `json:"messages"`
-	MaxTokens   *int                  `json:"max_tokens,omitempty"`
-	Temperature *float64              `json:"temperature,omitempty"`
-	TopP        *float64              `json:"top_p,omitempty"`
-	Stop        []string              `json:"stop,omitempty"`
-	Tools       []completionsTool     `json:"tools,omitempty"`
+	Model       string               `json:"model"`
+	Messages    []completionsMessage `json:"messages"`
+	MaxTokens   *int                 `json:"max_tokens,omitempty"`
+	Temperature *float64             `json:"temperature,omitempty"`
+	TopP        *float64             `json:"top_p,omitempty"`
+	Stop        []string             `json:"stop,omitempty"`
+	Tools       []completionsTool    `json:"tools,omitempty"`
+	Plugins     []Plugin             `json:"plugins,omitempty"`
 }
 
 type completionsMessage struct {
-	Role       string                   `json:"role"`
-	Content    string                   `json:"content,omitempty"`
-	ToolCalls  []completionsToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID string                   `json:"tool_call_id,omitempty"`
+	Role       string                `json:"role"`
+	Content    string                `json:"content,omitempty"`
+	ToolCalls  []completionsToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string                `json:"tool_call_id,omitempty"`
 }
 
 type completionsToolCall struct {
-	ID       string               `json:"id"`
-	Type     string               `json:"type"`
-	Function completionsFnCall    `json:"function"`
+	ID       string            `json:"id"`
+	Type     string            `json:"type"`
+	Function completionsFnCall `json:"function"`
 }
 
 type completionsFnCall struct {
@@ -528,8 +545,8 @@ type completionsFnCall struct {
 }
 
 type completionsTool struct {
-	Type     string            `json:"type"`
-	Function completionsFnDef  `json:"function"`
+	Type     string           `json:"type"`
+	Function completionsFnDef `json:"function"`
 }
 
 type completionsFnDef struct {
@@ -554,9 +571,22 @@ type completionsChoice struct {
 }
 
 type completionsRespMsg struct {
-	Role      string                `json:"role"`
-	Content   *string               `json:"content"`
-	ToolCalls []completionsToolCall `json:"tool_calls,omitempty"`
+	Role        string                  `json:"role"`
+	Content     *string                 `json:"content"`
+	ToolCalls   []completionsToolCall   `json:"tool_calls,omitempty"`
+	Annotations []completionsAnnotation `json:"annotations,omitempty"`
+}
+
+type completionsAnnotation struct {
+	Type        string                   `json:"type"`
+	URLCitation *completionsURLCitation  `json:"url_citation,omitempty"` // nested format (Perplexity/OpenRouter)
+	URL         string                   `json:"url,omitempty"`          // flat format (fallback)
+	Title       string                   `json:"title,omitempty"`        // flat format (fallback)
+}
+
+type completionsURLCitation struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
 }
 
 type completionsUsage struct {
@@ -599,6 +629,8 @@ func (c *CompletionsClient) buildWireRequest(req *Request) completionsRequest {
 			},
 		})
 	}
+
+	wireReq.Plugins = req.Plugins
 
 	return wireReq
 }
@@ -691,6 +723,19 @@ func (r *completionsResponse) toResponse() (*Response, error) {
 		resp.ToolCalls = append(resp.ToolCalls, parsed)
 	}
 
+	for _, ann := range choice.Message.Annotations {
+		if ann.Type != "url_citation" {
+			continue
+		}
+		url, title := ann.URL, ann.Title
+		if ann.URLCitation != nil {
+			url, title = ann.URLCitation.URL, ann.URLCitation.Title
+		}
+		if url != "" {
+			resp.Citations = append(resp.Citations, Citation{URL: url, Title: title})
+		}
+	}
+
 	if r.Usage != nil {
 		resp.Usage = Usage{
 			InputTokens:  r.Usage.PromptTokens,
@@ -775,26 +820,26 @@ func (c *ResponsesClient) SendMessage(ctx context.Context, req *Request) (*Respo
 // --- Responses wire format types ---
 
 type responsesRequest struct {
-	Model           string             `json:"model"`
-	Input           []responsesInput   `json:"input"`
-	Instructions    string             `json:"instructions,omitempty"`
-	Tools           []responsesTool    `json:"tools,omitempty"`
-	MaxOutputTokens *int               `json:"max_output_tokens,omitempty"`
-	Temperature     *float64           `json:"temperature,omitempty"`
-	TopP            *float64           `json:"top_p,omitempty"`
+	Model           string           `json:"model"`
+	Input           []responsesInput `json:"input"`
+	Instructions    string           `json:"instructions,omitempty"`
+	Tools           []responsesTool  `json:"tools,omitempty"`
+	MaxOutputTokens *int             `json:"max_output_tokens,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+	TopP            *float64         `json:"top_p,omitempty"`
 }
 
 // responsesInput is a union type for input items.
 // Only the relevant fields are populated based on Type.
 type responsesInput struct {
 	Type      string `json:"type"`
-	Role      string `json:"role,omitempty"`       // for type:"message"
-	Content   any    `json:"content,omitempty"`     // string for message
-	CallID    string `json:"call_id,omitempty"`     // for function_call / function_call_output
-	Name      string `json:"name,omitempty"`        // for function_call
-	Arguments string `json:"arguments,omitempty"`   // for function_call
-	ID        string `json:"id,omitempty"`          // for function_call
-	Output    string `json:"output,omitempty"`      // for function_call_output
+	Role      string `json:"role,omitempty"`      // for type:"message"
+	Content   any    `json:"content,omitempty"`   // string for message
+	CallID    string `json:"call_id,omitempty"`   // for function_call / function_call_output
+	Name      string `json:"name,omitempty"`      // for function_call
+	Arguments string `json:"arguments,omitempty"` // for function_call
+	ID        string `json:"id,omitempty"`        // for function_call
+	Output    string `json:"output,omitempty"`    // for function_call_output
 }
 
 type responsesTool struct {
@@ -805,14 +850,14 @@ type responsesTool struct {
 }
 
 type responsesResponse struct {
-	ID         string              `json:"id"`
-	Object     string              `json:"object"`
-	Model      string              `json:"model"`
-	Status     string              `json:"status"`
-	Output     []json.RawMessage   `json:"output"`
-	OutputText string              `json:"output_text"`
-	Usage      *responsesUsage     `json:"usage,omitempty"`
-	Error      *responsesError     `json:"error,omitempty"`
+	ID         string            `json:"id"`
+	Object     string            `json:"object"`
+	Model      string            `json:"model"`
+	Status     string            `json:"status"`
+	Output     []json.RawMessage `json:"output"`
+	OutputText string            `json:"output_text"`
+	Usage      *responsesUsage   `json:"usage,omitempty"`
+	Error      *responsesError   `json:"error,omitempty"`
 }
 
 type responsesUsage struct {
