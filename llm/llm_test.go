@@ -65,8 +65,8 @@ func TestSendMessage_SimpleText(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", got)
 		}
-		if got := r.Header.Get("X-Title"); got != "TestApp" {
-			t.Errorf("X-Title = %q, want TestApp", got)
+		if got := r.Header.Get("X-OpenRouter-Title"); got != "TestApp" {
+			t.Errorf("X-OpenRouter-Title = %q, want TestApp", got)
 		}
 		if got := r.Header.Get("HTTP-Referer"); got != "http://test" {
 			t.Errorf("HTTP-Referer = %q, want http://test", got)
@@ -521,8 +521,8 @@ func TestSendMessage_OptionalParams(t *testing.T) {
 
 func TestSendMessage_NoOptionalHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Title"); got != "" {
-			t.Errorf("X-Title = %q, want empty", got)
+		if got := r.Header.Get("X-OpenRouter-Title"); got != "" {
+			t.Errorf("X-OpenRouter-Title = %q, want empty", got)
 		}
 		if got := r.Header.Get("HTTP-Referer"); got != "" {
 			t.Errorf("HTTP-Referer = %q, want empty", got)
@@ -738,8 +738,8 @@ func TestCompletions_SimpleText(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("Authorization = %q", got)
 		}
-		if got := r.Header.Get("X-Title"); got != "TestApp" {
-			t.Errorf("X-Title = %q", got)
+		if got := r.Header.Get("X-OpenRouter-Title"); got != "TestApp" {
+			t.Errorf("X-OpenRouter-Title = %q", got)
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -1301,8 +1301,8 @@ func TestResponses_SimpleText(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("Authorization = %q", got)
 		}
-		if got := r.Header.Get("X-Title"); got != "TestApp" {
-			t.Errorf("X-Title = %q", got)
+		if got := r.Header.Get("X-OpenRouter-Title"); got != "TestApp" {
+			t.Errorf("X-OpenRouter-Title = %q", got)
 		}
 		if got := r.Header.Get("HTTP-Referer"); got != "http://test" {
 			t.Errorf("HTTP-Referer = %q", got)

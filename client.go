@@ -106,8 +106,9 @@ func NewClient(config Config) (*Client, error) {
 		APIKey:      config.APIKey,
 		BaseURL:     config.BaseURL,
 		HTTPTimeout: config.HTTPTimeout,
-		HTTPReferer: "http://localhost",
-		AppTitle:    "Agent",
+		HTTPReferer: "https://webforspeed.com",
+		AppTitle:    "webforspeed Bono",
+		Categories:  "cli-agent",
 		HTTPClient:  llmHTTPClient,
 	})
 	if err != nil {
@@ -203,8 +204,9 @@ func (c *Client) fetchModelUsageLimits(ctx context.Context, model string) (model
 	}
 
 	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	httpReq.Header.Set("HTTP-Referer", "http://localhost")
-	httpReq.Header.Set("X-Title", "Agent")
+	httpReq.Header.Set("HTTP-Referer", "https://webforspeed.com")
+	httpReq.Header.Set("X-OpenRouter-Title", "webforspeed Bono")
+	httpReq.Header.Set("X-OpenRouter-Categories", "cli-agent")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

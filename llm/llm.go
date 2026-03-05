@@ -125,7 +125,8 @@ type Config struct {
 	BaseURL     string        // Base URL (defaults to https://openrouter.ai/api/v1).
 	HTTPTimeout time.Duration // HTTP client timeout (defaults to 120s).
 	HTTPReferer string        // Optional HTTP-Referer header.
-	AppTitle    string        // Optional X-Title header.
+	AppTitle    string        // Optional X-OpenRouter-Title header.
+	Categories  string        // Optional X-OpenRouter-Categories header (comma-separated).
 	HTTPClient  *http.Client  // If non-nil, used instead of creating a default client.
 }
 
@@ -205,7 +206,10 @@ func (c *MessagesClient) SendMessage(ctx context.Context, req *Request) (*Respon
 		httpReq.Header.Set("HTTP-Referer", c.config.HTTPReferer)
 	}
 	if c.config.AppTitle != "" {
-		httpReq.Header.Set("X-Title", c.config.AppTitle)
+		httpReq.Header.Set("X-OpenRouter-Title", c.config.AppTitle)
+	}
+	if c.config.Categories != "" {
+		httpReq.Header.Set("X-OpenRouter-Categories", c.config.Categories)
 	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
@@ -490,7 +494,10 @@ func (c *CompletionsClient) SendMessage(ctx context.Context, req *Request) (*Res
 		httpReq.Header.Set("HTTP-Referer", c.config.HTTPReferer)
 	}
 	if c.config.AppTitle != "" {
-		httpReq.Header.Set("X-Title", c.config.AppTitle)
+		httpReq.Header.Set("X-OpenRouter-Title", c.config.AppTitle)
+	}
+	if c.config.Categories != "" {
+		httpReq.Header.Set("X-OpenRouter-Categories", c.config.Categories)
 	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
@@ -808,7 +815,10 @@ func (c *ResponsesClient) SendMessage(ctx context.Context, req *Request) (*Respo
 		httpReq.Header.Set("HTTP-Referer", c.config.HTTPReferer)
 	}
 	if c.config.AppTitle != "" {
-		httpReq.Header.Set("X-Title", c.config.AppTitle)
+		httpReq.Header.Set("X-OpenRouter-Title", c.config.AppTitle)
+	}
+	if c.config.Categories != "" {
+		httpReq.Header.Set("X-OpenRouter-Categories", c.config.Categories)
 	}
 
 	httpResp, err := c.httpClient.Do(httpReq)

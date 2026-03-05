@@ -121,7 +121,10 @@ func (c *CompletionsClient) SendMessageStream(ctx context.Context, req *Request)
 		httpReq.Header.Set("HTTP-Referer", c.config.HTTPReferer)
 	}
 	if c.config.AppTitle != "" {
-		httpReq.Header.Set("X-Title", c.config.AppTitle)
+		httpReq.Header.Set("X-OpenRouter-Title", c.config.AppTitle)
+	}
+	if c.config.Categories != "" {
+		httpReq.Header.Set("X-OpenRouter-Categories", c.config.Categories)
 	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
