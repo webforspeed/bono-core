@@ -9,10 +9,11 @@ type SearchFunc func(query string, opts map[string]any) ToolResult
 func CodeSearchTool(searchFn SearchFunc) *ToolDef {
 	return &ToolDef{
 		Name: "code_search",
-		Description: `Searches the codebase using semantic understanding. Finds code by meaning, not just text matching.
-Use for: finding implementations ("where is authentication handled?"), locating patterns ("error handling in HTTP handlers"), understanding architecture ("database connection setup"), finding similar code.
-Requires the codebase to be indexed first (user runs /index). Falls back to exact text search if no index exists.
-Results include file paths, line numbers, relevance scores, and code snippets.`,
+		Description: `Search the indexed codebase by meaning, intent, and structure—not just exact text.
+Best for locating implementations, tracing patterns across files, understanding architecture, and finding code similar to what is already in view.
+Use natural language queries like "where is authentication handled?" or "error handling in HTTP handlers".
+Requires an index (run /index). If semantic indexing is unavailable, search degrades toward exact text matching.
+Returns ranked matches with file paths, line numbers, and code snippets.`,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

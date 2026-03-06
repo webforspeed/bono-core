@@ -10,7 +10,7 @@ import (
 func PythonRuntimeTool(exec func(cmd string) ToolResult) *ToolDef {
 	return &ToolDef{
 		Name:        "python_runtime",
-		Description: "Executes Python code in the sandbox. Has full access to the filesystem (open/read/write), subprocess.run() for shell commands, and the standard library. When a task involves multiple related steps — reading several files, processing data, making edits, running commands — consider combining them into a single script. Process results in code and only print what's relevant — raw intermediate data never needs to leave the script. Returns stdout/stderr as output.",
+		Description: "Runs a Python script and returns stdout/stderr. Combines multiple operations into a single step — file reads, data processing, shell commands via subprocess, and output formatting all happen inside the script. Intermediate data stays in the script and never enters the conversation. Only the final print() output is returned. Particularly effective for: structured data (JSON, CSV, regex parsing), multi-file operations, aggregation/counting, and any task that would otherwise require multiple sequential tool calls.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

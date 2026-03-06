@@ -36,7 +36,7 @@ func RunShellTool(exec func(cmd string) ToolResult) *ToolDef {
 
 	return &ToolDef{
 		Name:        "run_shell",
-		Description: "Executes a shell command and returns the output. Use for any CLI operation: build commands, git operations, package managers, file exploration.",
+		Description: "Executes a single shell command and returns the output. Use for CLI tools, build commands, git operations, package managers, and file exploration.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

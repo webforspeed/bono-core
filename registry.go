@@ -3,15 +3,22 @@ package core
 // Registry holds tool definitions. Instance-based so each agent (or server session) can have its own set.
 type Registry struct {
 	tools map[string]*ToolDef
+	order []string // insertion order for deterministic tool listing
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{tools: make(map[string]*ToolDef)}
+	return &Registry{
+		tools: make(map[string]*ToolDef),
+		order: make([]string, 0),
+	}
 }
 
 // Register adds a tool to the registry, replacing any existing tool with the same name.
 func (r *Registry) Register(t *ToolDef) {
+	if _, exists := r.tools[t.Name]; !exists {
+		r.order = append(r.order, t.Name)
+	}
 	r.tools[t.Name] = t
 }
 
@@ -22,13 +29,15 @@ func (r *Registry) Get(name string) (*ToolDef, bool) {
 }
 
 // Tools returns API-ready []Tool for sending to the LLM.
-// If names is empty, returns all registered tools.
+// If names is empty, returns all registered tools in insertion order.
 // If names is provided, returns only matching tools (unknown names are skipped).
 func (r *Registry) Tools(names ...string) []Tool {
 	if len(names) == 0 {
-		tools := make([]Tool, 0, len(r.tools))
-		for _, t := range r.tools {
-			tools = append(tools, t.Tool())
+		tools := make([]Tool, 0, len(r.order))
+		for _, name := range r.order {
+			if t, ok := r.tools[name]; ok {
+				tools = append(tools, t.Tool())
+			}
 		}
 		return tools
 	}
