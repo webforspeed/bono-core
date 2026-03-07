@@ -87,8 +87,9 @@ func NewAgent(config Config) (*Agent, error) {
 	// Dependencies are injected as closures that capture the agent pointer.
 	// Hooks (OnSandboxFallback etc.) are set by the caller after NewAgent returns;
 	// closures evaluate them at call time, so they pick up the final values.
-	shellExec := func(cmd string) ToolResult {
-		return ExecuteShellWithSandbox(cmd, a.OnSandboxFallback)
+	shellPolicy := config.ShellPolicy
+	shellExec := func(req ShellRequest) ToolResult {
+		return ExecuteShellRequest(req, shellPolicy, a.OnSandboxFallback)
 	}
 	a.registry = NewRegistry()
 	a.registry.Register(ReadFileTool())

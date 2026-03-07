@@ -65,9 +65,9 @@ func TestIsExplorationCommand(t *testing.T) {
 
 func TestRunShellToolNudgeFiresOnce(t *testing.T) {
 	callCount := 0
-	exec := func(cmd string) ToolResult {
+	exec := func(req ShellRequest) ToolResult {
 		callCount++
-		return ToolResult{Success: true, Output: "output-" + cmd}
+		return ToolResult{Success: true, Output: "output-" + req.Command}
 	}
 
 	tool := RunShellTool(exec)
@@ -90,7 +90,7 @@ func TestRunShellToolNudgeFiresOnce(t *testing.T) {
 }
 
 func TestRunShellToolNudgeSkipsNonExploration(t *testing.T) {
-	exec := func(cmd string) ToolResult {
+	exec := func(req ShellRequest) ToolResult {
 		return ToolResult{Success: true, Output: "output"}
 	}
 
@@ -111,7 +111,7 @@ func TestRunShellToolNudgeSkipsNonExploration(t *testing.T) {
 }
 
 func TestRunShellToolNudgeSkipsFailedCommands(t *testing.T) {
-	exec := func(cmd string) ToolResult {
+	exec := func(req ShellRequest) ToolResult {
 		return ToolResult{Success: false, Output: "error: not found"}
 	}
 

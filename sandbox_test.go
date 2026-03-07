@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSandboxAvailable(t *testing.T) {
@@ -38,6 +39,10 @@ func TestDefaultSandboxConfig(t *testing.T) {
 
 	if len(cfg.ExecPaths) == 0 {
 		t.Error("ExecPaths should have default values")
+	}
+
+	if cfg.CommandTimeout <= 0 {
+		t.Error("CommandTimeout should have a positive default")
 	}
 
 	t.Logf("Default config: Enabled=%v, ReadPaths=%v, WritePaths=%v, ExecPaths=%v",
@@ -131,6 +136,53 @@ func TestPassthroughExecutor(t *testing.T) {
 
 	if !strings.Contains(result.Output, "passthrough test") {
 		t.Errorf("Expected output to contain 'passthrough test', got: %s", result.Output)
+	}
+}
+
+func TestSandboxedExecutorTimeout(t *testing.T) {
+	if !sandboxAvailable() {
+		t.Skip("sandbox-exec not available")
+	}
+
+	cfg := DefaultSandboxConfig()
+	cfg.CommandTimeout = 100 * time.Millisecond
+	exec := NewShellExecutor(cfg)
+
+	result, meta := exec.Run("sleep 1")
+
+	if result.Success {
+		t.Fatal("expected sandboxed timeout to fail")
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "deadline exceeded") {
+		t.Fatalf("expected deadline exceeded error, got: %v", result.Error)
+	}
+	if result.Status == "" || !strings.Contains(result.Status, "timeout") {
+		t.Fatalf("expected timeout status, got: %q", result.Status)
+	}
+	if !meta.Sandboxed {
+		t.Fatal("expected sandboxed meta on timeout")
+	}
+	if !strings.Contains(meta.SandboxReason, "timed out inside sandbox") {
+		t.Fatalf("expected sandbox timeout reason, got: %q", meta.SandboxReason)
+	}
+}
+
+func TestPassthroughExecutorTimeout(t *testing.T) {
+	exec := &PassthroughExecutor{config: SandboxConfig{CommandTimeout: 100 * time.Millisecond}}
+
+	result, meta := exec.Run("sleep 1")
+
+	if result.Success {
+		t.Fatal("expected passthrough timeout to fail")
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "deadline exceeded") {
+		t.Fatalf("expected deadline exceeded error, got: %v", result.Error)
+	}
+	if result.Status == "" || !strings.Contains(result.Status, "timeout") {
+		t.Fatalf("expected timeout status, got: %q", result.Status)
+	}
+	if meta.Sandboxed {
+		t.Fatal("expected non-sandboxed meta on passthrough timeout")
 	}
 }
 

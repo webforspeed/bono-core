@@ -31,7 +31,7 @@ func explorationNudge() string {
 
 // RunShellTool returns the run_shell tool definition.
 // exec is the shell executor — the agent injects sandbox+fallback handling.
-func RunShellTool(exec func(cmd string) ToolResult) *ToolDef {
+func RunShellTool(exec func(req ShellRequest) ToolResult) *ToolDef {
 	nudged := false
 
 	return &ToolDef{
@@ -57,10 +57,10 @@ func RunShellTool(exec func(cmd string) ToolResult) *ToolDef {
 			"required": []any{"command", "description", "safety"},
 		},
 		Execute: func(args map[string]any) ToolResult {
-			cmd, _ := args["command"].(string)
-			result := exec(cmd)
+			req := ShellRequestFromToolArgs("run_shell", args)
+			result := exec(req)
 
-			if !nudged && result.Success && isExplorationCommand(cmd) {
+			if !nudged && result.Success && isExplorationCommand(req.Command) {
 				result.Output += "\n\n" + explorationNudge()
 				nudged = true
 			}
