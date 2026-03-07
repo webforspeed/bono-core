@@ -7,7 +7,7 @@ import (
 
 // PythonRuntimeTool returns the python_runtime tool definition.
 // exec is the shell executor — the agent injects sandbox+fallback handling.
-func PythonRuntimeTool(exec func(cmd string) ToolResult) *ToolDef {
+func PythonRuntimeTool(exec func(req ShellRequest) ToolResult) *ToolDef {
 	return &ToolDef{
 		Name:        "python_runtime",
 		Description: "Runs a Python script and returns stdout/stderr. Combines multiple operations into a single step — file reads, data processing, shell commands via subprocess, and output formatting all happen inside the script. Intermediate data stays in the script and never enters the conversation. Only the final print() output is returned. Particularly effective for: structured data (JSON, CSV, regex parsing), multi-file operations, aggregation/counting, and any task that would otherwise require multiple sequential tool calls.",
@@ -31,8 +31,8 @@ func PythonRuntimeTool(exec func(cmd string) ToolResult) *ToolDef {
 			"required": []any{"code", "description", "safety"},
 		},
 		Execute: func(args map[string]any) ToolResult {
-			code, _ := args["code"].(string)
-			return exec(pythonCommand(code))
+			req := ShellRequestFromToolArgs("python_runtime", args)
+			return exec(req)
 		},
 		AutoApprove: func(sandboxed bool) bool {
 			return sandboxed && IsSandboxEnabled()

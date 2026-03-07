@@ -1,6 +1,8 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +17,8 @@ type ShellExecutor interface {
 	Run(command string) (ToolResult, ExecMeta)
 }
 
+const defaultCommandTimeout = 30 * time.Second
+
 // sandboxAvailable checks if macOS sandbox-exec is available.
 func sandboxAvailable() bool {
 	if runtime.GOOS != "darwin" {
@@ -27,10 +31,11 @@ func sandboxAvailable() bool {
 // NewShellExecutor creates the appropriate executor based on config and platform.
 // Returns a SandboxedExecutor on macOS with sandbox enabled, otherwise PassthroughExecutor.
 func NewShellExecutor(cfg SandboxConfig) ShellExecutor {
+	cfg = normalizeSandboxConfig(cfg)
 	if cfg.Enabled && sandboxAvailable() {
 		return &SandboxedExecutor{config: cfg}
 	}
-	return &PassthroughExecutor{}
+	return &PassthroughExecutor{config: cfg}
 }
 
 // DefaultSandboxConfig returns sensible defaults for sandbox configuration.
@@ -57,7 +62,15 @@ func DefaultSandboxConfig() SandboxConfig {
 			"/sbin",
 		},
 		FallbackOutsideSandbox: true,
+		CommandTimeout:         defaultCommandTimeout,
 	}
+}
+
+func normalizeSandboxConfig(cfg SandboxConfig) SandboxConfig {
+	if cfg.CommandTimeout <= 0 {
+		cfg.CommandTimeout = defaultCommandTimeout
+	}
+	return cfg
 }
 
 // SandboxedExecutor executes commands inside macOS sandbox-exec.
@@ -70,7 +83,10 @@ func (s *SandboxedExecutor) Run(command string) (ToolResult, ExecMeta) {
 	profile := s.generateProfile()
 
 	start := time.Now()
-	cmd := exec.Command("sandbox-exec", "-p", profile, "sh", "-c", command)
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.CommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sandbox-exec", "-p", profile, "sh", "-c", command)
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start).Seconds()
 
@@ -79,6 +95,16 @@ func (s *SandboxedExecutor) Run(command string) (ToolResult, ExecMeta) {
 	if err != nil {
 		// Check if this is a sandbox denial vs regular command failure
 		output := string(out)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			meta.SandboxReason = fmt.Sprintf("timed out inside sandbox after %s", s.config.CommandTimeout)
+			return ToolResult{
+				Success:  false,
+				Output:   output,
+				Error:    ctx.Err(),
+				Status:   fmt.Sprintf("timeout (%.1fs)", elapsed),
+				ExecMeta: &meta,
+			}, meta
+		}
 		if isSandboxDenial(output, err) {
 			meta.SandboxError = true
 			meta.SandboxReason = extractSandboxReason(output)
@@ -205,17 +231,32 @@ func extractSandboxReason(output string) string {
 }
 
 // PassthroughExecutor executes commands directly without sandboxing.
-type PassthroughExecutor struct{}
+type PassthroughExecutor struct {
+	config SandboxConfig
+}
 
 // Run executes a command directly (no sandbox).
 func (p *PassthroughExecutor) Run(command string) (ToolResult, ExecMeta) {
 	meta := ExecMeta{Sandboxed: false}
 
 	start := time.Now()
-	out, err := exec.Command("sh", "-c", command).CombinedOutput()
+	cfg := normalizeSandboxConfig(p.config)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.CommandTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
 	elapsed := time.Since(start).Seconds()
 
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ToolResult{
+				Success:  false,
+				Output:   string(out),
+				Error:    ctx.Err(),
+				Status:   fmt.Sprintf("timeout (%.1fs)", elapsed),
+				ExecMeta: &meta,
+			}, meta
+		}
 		return ToolResult{
 			Success:  false,
 			Output:   string(out),
@@ -255,4 +296,15 @@ func IsSandboxEnabled() bool {
 	exec := GetExecutor()
 	_, isSandboxed := exec.(*SandboxedExecutor)
 	return isSandboxed
+}
+
+// SandboxFallbackEnabled returns true when the active sandbox executor is
+// configured to allow approval-based retries outside the sandbox.
+func SandboxFallbackEnabled() bool {
+	exec := GetExecutor()
+	sandboxed, ok := exec.(*SandboxedExecutor)
+	if !ok {
+		return false
+	}
+	return sandboxed.config.FallbackOutsideSandbox
 }
