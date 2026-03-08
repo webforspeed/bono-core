@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	maxChatTurns    = 20 // allows for summary rounds that compress context
-	maxPreTaskTurns = 10
+	maxChatTurns       = 20 // allows for summary rounds that compress context
+	maxPreTaskTurns    = 10
+	maxSubAgentTurns   = 100
 )
 
 // Agent orchestrates conversations with an LLM and executes tools.
@@ -24,6 +25,7 @@ type Agent struct {
 	codeSearchErr error
 	web           *WebService
 	webErr        error
+	subAgents     map[string]SubAgent
 
 	// Optional hooks - nil means default behavior (auto-execute, no output)
 
@@ -43,6 +45,12 @@ type Agent struct {
 
 	// OnPreTaskEnd is called when a pre-task completes.
 	OnPreTaskEnd func(name string)
+
+	// OnSubAgentStart is called when a subagent begins execution.
+	OnSubAgentStart func(name string)
+
+	// OnSubAgentEnd is called when a subagent completes execution.
+	OnSubAgentEnd func(name string)
 
 	// OnSandboxFallback is called when sandbox blocks a command.
 	// Return true to execute outside sandbox (requires approval), false to cancel.
@@ -81,7 +89,7 @@ func NewAgent(config Config) (*Agent, error) {
 	}
 	InitSandbox(sandboxCfg)
 
-	a := &Agent{config: config, client: client}
+	a := &Agent{config: config, client: client, subAgents: make(map[string]SubAgent)}
 
 	// Build tool registry — all tools get the same treatment.
 	// Dependencies are injected as closures that capture the agent pointer.
@@ -146,6 +154,9 @@ func NewAgent(config Config) (*Agent, error) {
 	// Register default middleware.
 	client.Use(ContextUsageMiddleware(client.LastUsage))
 
+	// Register built-in subagents.
+	a.registerBuiltinSubAgents()
+
 	return a, nil
 }
 
@@ -187,6 +198,17 @@ func (a *Agent) WebInitError() error {
 		return nil
 	}
 	return a.webErr
+}
+
+// RegisterSubAgent registers a subagent for later lookup and execution.
+func (a *Agent) RegisterSubAgent(sa SubAgent) {
+	a.subAgents[sa.Name()] = sa
+}
+
+// SubAgent returns a registered subagent by name.
+func (a *Agent) SubAgent(name string) (SubAgent, bool) {
+	sa, ok := a.subAgents[name]
+	return sa, ok
 }
 
 // RegisterTool adds a tool to the agent's registry after creation.
@@ -561,6 +583,114 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 		a.OnPreTaskEnd(task.Name)
 	}
 	return nil
+}
+
+// RunSubAgent executes a subagent in an isolated message history.
+// Tool schemas sent to the LLM are filtered to the subagent's AllowedTools.
+// Returns the subagent's final response, which is also appended to the main
+// agent's conversation history as a handoff so follow-up prompts have context.
+func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (string, error) {
+	if a.OnSubAgentStart != nil {
+		a.OnSubAgentStart(sa.Name())
+	}
+	defer func() {
+		if a.OnSubAgentEnd != nil {
+			a.OnSubAgentEnd(sa.Name())
+		}
+	}()
+
+	// Build filtered tool list for the LLM API call.
+	allowed := sa.AllowedTools()
+	tools := a.registry.Tools(allowed...)
+
+	// Build allowlist set for runtime rejection.
+	allowSet := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		allowSet[name] = true
+	}
+
+	// Isolated message history.
+	msgs := []Message{
+		{Role: "system", Content: sa.SystemPrompt()},
+		{Role: "user", Content: input},
+	}
+
+	for turns := 0; ; turns++ {
+		if turns >= maxSubAgentTurns {
+			return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrMaxTurnsExceeded)
+		}
+
+		msg, err := a.client.ChatCompletionWithTools(ctx, msgs, tools)
+		if err != nil {
+			return "", err
+		}
+		a.fireResponseModel()
+		a.fireContextUsage()
+		msgs = append(msgs, *msg)
+
+		content := messageContent(msg)
+		if a.OnMessage != nil && strings.TrimSpace(content) != "" {
+			a.OnMessage(content)
+		}
+
+		if len(msg.ToolCalls) == 0 {
+			if content == "" {
+				return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrEmptyResponse)
+			}
+			// Handoff: inject the subagent's final response into the main agent's
+			// conversation so follow-up prompts have context on what was done.
+			handoff := fmt.Sprintf("[%s agent summary]\n%s", sa.Name(), content)
+			a.msgs = append(a.msgs, Message{Role: "assistant", Content: handoff})
+			return content, nil
+		}
+
+		var toolResults []Message
+		cancelled := false
+
+		for _, tc := range msg.ToolCalls {
+			var args map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+
+			// Runtime rejection for disallowed tools.
+			if len(allowSet) > 0 && !allowSet[tc.Function.Name] {
+				toolResults = append(toolResults, Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("error: tool %q is not available in this mode", tc.Function.Name),
+				})
+				continue
+			}
+
+			if a.OnToolCall != nil && !a.OnToolCall(tc.Function.Name, args) {
+				cancelled = true
+				break
+			}
+
+			var result ToolResult
+			tool, ok := a.registry.Get(tc.Function.Name)
+			if !ok {
+				result = ToolResult{Success: false, Error: fmt.Errorf("unknown tool: %s", tc.Function.Name), Status: "fail: unknown tool"}
+			} else {
+				result = tool.Execute(args)
+			}
+
+			if a.OnToolDone != nil {
+				a.OnToolDone(tc.Function.Name, args, result)
+			}
+
+			toolResults = append(toolResults, Message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    result.Output,
+			})
+		}
+
+		if cancelled {
+			return "", ErrToolCancelled
+		}
+
+		msgs = append(msgs, toolResults...)
+	}
 }
 
 func messageContent(msg *Message) string {
