@@ -624,9 +624,13 @@ func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (*Su
 	}
 
 	// Isolated message history.
+	userContent := input
+	if f, ok := sa.(UserPromptFormatter); ok {
+		userContent = f.FormatUserPrompt(input)
+	}
 	msgs := []Message{
 		{Role: "system", Content: sa.SystemPrompt()},
-		{Role: "user", Content: input},
+		{Role: "user", Content: userContent},
 	}
 
 	for turns := 0; ; turns++ {

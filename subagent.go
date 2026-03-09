@@ -17,6 +17,12 @@ type SubAgent interface {
 	SystemPrompt() string
 }
 
+// UserPromptFormatter is an optional interface subagents can implement to
+// wrap or transform the raw user input before it becomes the first user message.
+type UserPromptFormatter interface {
+	FormatUserPrompt(input string) string
+}
+
 // SubAgentHook runs after a subagent completes. Hooks are composable —
 // multiple hooks can be attached to a single subagent via RegisterSubAgent.
 // Hooks execute in registration order and can annotate the result via Meta.
