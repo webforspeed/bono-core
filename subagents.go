@@ -29,5 +29,10 @@ var _ SubAgent = (*planAgent)(nil)
 // registerBuiltinSubAgents registers all built-in subagents.
 // Called from NewAgent so every consumer gets them automatically.
 func (a *Agent) registerBuiltinSubAgents() {
-	a.RegisterSubAgent(newPlanAgent())
+	a.RegisterSubAgent(newPlanAgent(),
+		PersistHook("~/.bono/{cwd}/plans"),
+		ApprovalHook(func() func(SubAgentResult) SubAgentApprovalResponse {
+			return a.OnSubAgentApproval
+		}),
+	)
 }

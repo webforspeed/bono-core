@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 )
 
@@ -25,7 +27,8 @@ type Agent struct {
 	codeSearchErr error
 	web           *WebService
 	webErr        error
-	subAgents     map[string]SubAgent
+	subAgents              map[string]subAgentEntry
+	subAgentLastOutputPath map[string]string // tracks output_path across revision cycles
 
 	// Optional hooks - nil means default behavior (auto-execute, no output)
 
@@ -68,6 +71,11 @@ type Agent struct {
 
 	// OnReasoningDelta is called for each reasoning text fragment during streaming.
 	OnReasoningDelta func(delta string)
+
+	// OnSubAgentApproval is called after subagent hooks complete when an
+	// ApprovalHook is registered. Blocks until the user responds.
+	// If nil, ApprovalHook auto-approves.
+	OnSubAgentApproval func(result SubAgentResult) SubAgentApprovalResponse
 }
 
 // NewAgent creates an agent. Set hooks after creation to customize behavior.
@@ -89,7 +97,7 @@ func NewAgent(config Config) (*Agent, error) {
 	}
 	InitSandbox(sandboxCfg)
 
-	a := &Agent{config: config, client: client, subAgents: make(map[string]SubAgent)}
+	a := &Agent{config: config, client: client, subAgents: make(map[string]subAgentEntry)}
 
 	// Build tool registry — all tools get the same treatment.
 	// Dependencies are injected as closures that capture the agent pointer.
@@ -200,15 +208,21 @@ func (a *Agent) WebInitError() error {
 	return a.webErr
 }
 
-// RegisterSubAgent registers a subagent for later lookup and execution.
-func (a *Agent) RegisterSubAgent(sa SubAgent) {
-	a.subAgents[sa.Name()] = sa
+// RegisterSubAgent registers a subagent with optional hooks for later lookup and execution.
+// Hooks execute in order after the subagent completes.
+func (a *Agent) RegisterSubAgent(sa SubAgent, hooks ...SubAgentHook) {
+	a.subAgents[sa.Name()] = subAgentEntry{agent: sa, hooks: hooks}
 }
 
 // SubAgent returns a registered subagent by name.
 func (a *Agent) SubAgent(name string) (SubAgent, bool) {
-	sa, ok := a.subAgents[name]
-	return sa, ok
+	entry, ok := a.subAgents[name]
+	return entry.agent, ok
+}
+
+// subAgentHooks returns the hooks for a registered subagent.
+func (a *Agent) subAgentHooks(name string) []SubAgentHook {
+	return a.subAgents[name].hooks
 }
 
 // RegisterTool adds a tool to the agent's registry after creation.
@@ -587,9 +601,9 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 
 // RunSubAgent executes a subagent in an isolated message history.
 // Tool schemas sent to the LLM are filtered to the subagent's AllowedTools.
-// Returns the subagent's final response, which is also appended to the main
-// agent's conversation history as a handoff so follow-up prompts have context.
-func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (string, error) {
+// Returns the SubAgentResult (with Meta annotations from hooks) and appends
+// a handoff to the main conversation so follow-up prompts have context.
+func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (*SubAgentResult, error) {
 	if a.OnSubAgentStart != nil {
 		a.OnSubAgentStart(sa.Name())
 	}
@@ -617,12 +631,12 @@ func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (str
 
 	for turns := 0; ; turns++ {
 		if turns >= maxSubAgentTurns {
-			return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrMaxTurnsExceeded)
+			return nil, fmt.Errorf("subagent %s: %w", sa.Name(), ErrMaxTurnsExceeded)
 		}
 
 		msg, err := a.client.ChatCompletionWithTools(ctx, msgs, tools)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		a.fireResponseModel()
 		a.fireContextUsage()
@@ -635,13 +649,20 @@ func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (str
 
 		if len(msg.ToolCalls) == 0 {
 			if content == "" {
-				return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrEmptyResponse)
+				return nil, fmt.Errorf("subagent %s: %w", sa.Name(), ErrEmptyResponse)
 			}
-			// Handoff: inject the subagent's final response into the main agent's
-			// conversation so follow-up prompts have context on what was done.
-			handoff := fmt.Sprintf("[%s agent summary]\n%s", sa.Name(), content)
+
+			// Run hooks and handle approval/revision loop.
+			hooks := a.subAgentHooks(sa.Name())
+			result, err := a.runSubAgentHooks(ctx, sa, hooks, content, input, &msgs, tools, allowSet)
+			if err != nil {
+				return nil, err
+			}
+
+			// Build handoff based on hook annotations.
+			handoff := a.buildSubAgentHandoff(sa.Name(), result)
 			a.msgs = append(a.msgs, Message{Role: "assistant", Content: handoff})
-			return content, nil
+			return result, nil
 		}
 
 		var toolResults []Message
@@ -686,7 +707,7 @@ func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (str
 		}
 
 		if cancelled {
-			return "", ErrToolCancelled
+			return nil, ErrToolCancelled
 		}
 
 		msgs = append(msgs, toolResults...)
@@ -780,4 +801,175 @@ func (a *Agent) fireResponseModel() {
 		return
 	}
 	a.OnResponseModel(model)
+}
+
+// runSubAgentHooks executes hooks after a subagent completes and handles the
+// revision loop: if a hook sets Meta["approval"]="revise", the feedback is
+// appended to the isolated history and the LLM loop continues.
+func (a *Agent) runSubAgentHooks(
+	ctx context.Context,
+	sa SubAgent,
+	hooks []SubAgentHook,
+	content, input string,
+	msgs *[]Message,
+	tools []Tool,
+	allowSet map[string]bool,
+) (*SubAgentResult, error) {
+	if len(hooks) == 0 {
+		return &SubAgentResult{
+			Name:    sa.Name(),
+			Input:   input,
+			Content: content,
+			Meta:    make(map[string]string),
+		}, nil
+	}
+
+	cwd, _ := os.Getwd()
+
+	for {
+		result := &SubAgentResult{
+			Name:    sa.Name(),
+			Input:   input,
+			Content: content,
+			CWD:     cwd,
+			Meta:    make(map[string]string),
+		}
+
+		// Preserve output_path across revisions so PersistHook overwrites the same file.
+		if prev, ok := a.subAgentLastOutputPath[sa.Name()]; ok {
+			result.Meta["output_path"] = prev
+		}
+
+		for _, hook := range hooks {
+			if err := hook.AfterComplete(ctx, result); err != nil {
+				log.Printf("subagent %s hook error: %v", sa.Name(), err)
+			}
+		}
+
+		// Remember output_path for revision cycles.
+		if p := result.Meta["output_path"]; p != "" {
+			if a.subAgentLastOutputPath == nil {
+				a.subAgentLastOutputPath = make(map[string]string)
+			}
+			a.subAgentLastOutputPath[sa.Name()] = p
+		}
+
+		if result.Meta["approval"] != "revise" {
+			// Clean up revision state.
+			delete(a.subAgentLastOutputPath, sa.Name())
+			return result, nil
+		}
+
+		// Revision: append feedback and continue the LLM loop.
+		feedback := result.Meta["feedback"]
+		*msgs = append(*msgs, Message{Role: "user", Content: feedback})
+
+		revised, err := a.continueSubAgentLoop(ctx, sa, msgs, tools, allowSet)
+		if err != nil {
+			return nil, err
+		}
+		content = revised
+	}
+}
+
+// continueSubAgentLoop runs the subagent LLM loop from the current message
+// state until the next final response (no tool calls).
+func (a *Agent) continueSubAgentLoop(
+	ctx context.Context,
+	sa SubAgent,
+	msgs *[]Message,
+	tools []Tool,
+	allowSet map[string]bool,
+) (string, error) {
+	for turns := 0; ; turns++ {
+		if turns >= maxSubAgentTurns {
+			return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrMaxTurnsExceeded)
+		}
+
+		msg, err := a.client.ChatCompletionWithTools(ctx, *msgs, tools)
+		if err != nil {
+			return "", err
+		}
+		a.fireResponseModel()
+		a.fireContextUsage()
+		*msgs = append(*msgs, *msg)
+
+		content := messageContent(msg)
+		if a.OnMessage != nil && strings.TrimSpace(content) != "" {
+			a.OnMessage(content)
+		}
+
+		if len(msg.ToolCalls) == 0 {
+			if content == "" {
+				return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrEmptyResponse)
+			}
+			return content, nil
+		}
+
+		var toolResults []Message
+		cancelled := false
+
+		for _, tc := range msg.ToolCalls {
+			var args map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+
+			if len(allowSet) > 0 && !allowSet[tc.Function.Name] {
+				toolResults = append(toolResults, Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("error: tool %q is not available in this mode", tc.Function.Name),
+				})
+				continue
+			}
+
+			if a.OnToolCall != nil && !a.OnToolCall(tc.Function.Name, args) {
+				cancelled = true
+				break
+			}
+
+			var result ToolResult
+			tool, ok := a.registry.Get(tc.Function.Name)
+			if !ok {
+				result = ToolResult{Success: false, Error: fmt.Errorf("unknown tool: %s", tc.Function.Name), Status: "fail: unknown tool"}
+			} else {
+				result = tool.Execute(args)
+			}
+
+			if a.OnToolDone != nil {
+				a.OnToolDone(tc.Function.Name, args, result)
+			}
+
+			toolResults = append(toolResults, Message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    result.Output,
+			})
+		}
+
+		if cancelled {
+			return "", ErrToolCancelled
+		}
+
+		*msgs = append(*msgs, toolResults...)
+	}
+}
+
+// buildSubAgentHandoff constructs the handoff message injected into the main
+// conversation based on hook annotations.
+func (a *Agent) buildSubAgentHandoff(name string, result *SubAgentResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s agent summary]\n%s", name, result.Content)
+
+	if path := result.Meta["output_path"]; path != "" {
+		fmt.Fprintf(&b, "\n\nPlan saved to %s.", path)
+	}
+
+	switch result.Meta["approval"] {
+	case "approved":
+		b.WriteString("\nImplement the plan above. Follow each step in order.")
+	case "rejected":
+		b.WriteString("\nPlan was not approved for implementation.")
+	}
+
+	return b.String()
 }
