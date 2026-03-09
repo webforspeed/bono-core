@@ -21,7 +21,9 @@ func newPlanAgent() *planAgent {
 }
 
 func (a *planAgent) Name() string          { return "plan" }
-func (a *planAgent) AllowedTools() []string { return []string{"read_file", "run_shell", "code_search"} }
+func (a *planAgent) AllowedTools() []string {
+	return []string{"read_file", "run_shell", "code_search", "WebFetch", "WebSearch", "compact_context", "python_runtime"}
+}
 func (a *planAgent) SystemPrompt() string   { return a.prompt }
 
 var _ SubAgent = (*planAgent)(nil)

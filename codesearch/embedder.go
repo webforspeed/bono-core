@@ -157,6 +157,9 @@ func (e *Embedder) doRequest(ctx context.Context, body []byte) ([][]float32, err
 	}
 	req.Header.Set("Authorization", "Bearer "+e.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("HTTP-Referer", "https://webforspeed.com")
+	req.Header.Set("X-OpenRouter-Title", "webforspeed Bono")
+	req.Header.Set("X-OpenRouter-Categories", "cli-agent")
 
 	resp, err := e.httpClient.Do(req)
 	if err != nil {

@@ -85,9 +85,12 @@ func NewWebService(cfg WebConfig) (*WebService, error) {
 
 	transport := &capturingTransport{base: http.DefaultTransport}
 	inner, err := llm.NewCompletionsClient(llm.Config{
-		APIKey:     cfg.APIKey,
-		BaseURL:    cfg.BaseURL,
-		HTTPClient: &http.Client{Transport: transport},
+		APIKey:      cfg.APIKey,
+		BaseURL:     cfg.BaseURL,
+		HTTPClient:  &http.Client{Transport: transport},
+		HTTPReferer: "https://webforspeed.com",
+		AppTitle:    "webforspeed Bono",
+		Categories:  "cli-agent",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("web: create provider: %w", err)
