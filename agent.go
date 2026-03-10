@@ -9,24 +9,18 @@ import (
 	"strings"
 )
 
-const (
-	maxChatTurns       = 100 // allows for summary rounds that compress context
-	maxPreTaskTurns    = 100
-	maxSubAgentTurns   = 100
-)
-
 // Agent orchestrates conversations with an LLM and executes tools.
 type Agent struct {
-	config        Config
-	client        *Client
-	registry      *Registry
-	apiTools      []Tool // resolved from registry, filtered by AllowedTools
-	msgs          []Message
-	preTasksDone  bool // tracks if pre-tasks have executed
-	codeSearch    *CodeSearchService
-	codeSearchErr error
-	web           *WebService
-	webErr        error
+	config                 Config
+	client                 *Client
+	registry               *Registry
+	apiTools               []Tool // resolved from registry, filtered by AllowedTools
+	msgs                   []Message
+	preTasksDone           bool // tracks if pre-tasks have executed
+	codeSearch             *CodeSearchService
+	codeSearchErr          error
+	web                    *WebService
+	webErr                 error
 	subAgents              map[string]subAgentEntry
 	subAgentLastOutputPath map[string]string // tracks output_path across revision cycles
 
@@ -266,7 +260,7 @@ func (a *Agent) Chat(ctx context.Context, input string) (string, error) {
 
 	toolCallsSinceLastSummary := 0
 	for turns := 0; ; turns++ {
-		if turns >= maxChatTurns {
+		if reachedTurnLimit(turns, a.config.MaxChatTurns) {
 			return "", ErrMaxTurnsExceeded
 		}
 		msg, err := a.chatCompletion(ctx)
@@ -549,7 +543,7 @@ func (a *Agent) runPreTask(ctx context.Context, task PreTaskConfig) error {
 
 	// Run task loop until DoneMarker detected
 	for turns := 0; ; turns++ {
-		if turns >= maxPreTaskTurns {
+		if reachedTurnLimit(turns, a.config.MaxPreTaskTurns) {
 			return fmt.Errorf("pretask %s: %w", task.Name, ErrMaxTurnsExceeded)
 		}
 		msg, err := a.client.ChatCompletionWithTools(ctx, taskMsgs, a.apiTools)
@@ -660,7 +654,7 @@ func (a *Agent) RunSubAgent(ctx context.Context, sa SubAgent, input string) (*Su
 	}
 
 	for turns := 0; ; turns++ {
-		if turns >= maxSubAgentTurns {
+		if reachedTurnLimit(turns, a.config.MaxSubAgentTurns) {
 			return nil, fmt.Errorf("subagent %s: %w", sa.Name(), ErrMaxTurnsExceeded)
 		}
 
@@ -912,7 +906,7 @@ func (a *Agent) continueSubAgentLoop(
 	allowSet map[string]bool,
 ) (string, error) {
 	for turns := 0; ; turns++ {
-		if turns >= maxSubAgentTurns {
+		if reachedTurnLimit(turns, a.config.MaxSubAgentTurns) {
 			return "", fmt.Errorf("subagent %s: %w", sa.Name(), ErrMaxTurnsExceeded)
 		}
 
@@ -1015,4 +1009,8 @@ A list of files that were created or modified, with (NEW) or (MODIFIED) markers.
 	}
 
 	return b.String()
+}
+
+func reachedTurnLimit(turns, maxTurns int) bool {
+	return maxTurns > 0 && turns >= maxTurns
 }

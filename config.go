@@ -20,7 +20,7 @@ type SandboxConfig struct {
 	WritePaths             []string      // Read/write path allowlist (default: cwd + temp)
 	ExecPaths              []string      // Executable path allowlist
 	FallbackOutsideSandbox bool          // Allow approval-based rerun outside sandbox if blocked (default true)
-	CommandTimeout         time.Duration // Max runtime for shell/python commands; 0 uses the default timeout
+	CommandTimeout         time.Duration // Max runtime for shell/python commands; 0 uses default timeout, <0 disables timeout
 }
 
 // WebConfig configures the web search and fetch tools.
@@ -51,6 +51,10 @@ type Config struct {
 	Web                 *WebConfig        // Optional web search/fetch configuration. Nil disables web tools.
 	APILogPath          string            // Path to JSONL log file (default: logs/api_calls.jsonl)
 	MaxToolCallsPerTurn int               // Cap tool calls per round; 0 = unlimited. When hit, agent asks for a summary before continuing.
+	MaxChatTurns        int               // Cap main chat rounds; 0 = unlimited.
+	MaxPreTaskTurns     int               // Cap pre-task rounds; 0 = unlimited.
+	MaxSubAgentTurns    int               // Cap subagent rounds; 0 = unlimited.
+	DisableLimits       bool              // Skip timeout/turn default limits and honor zero-values as unlimited.
 	ReasoningEffort     string            // Reasoning effort level (e.g., "high", "medium", "low"). Empty = not sent.
 }
 
@@ -62,11 +66,20 @@ func (c *Config) Validate() error {
 	if c.Model == "" {
 		c.Model = "anthropic/claude-opus-4.5"
 	}
-	if c.HTTPTimeout == 0 {
+	if c.HTTPTimeout == 0 && !c.DisableLimits {
 		c.HTTPTimeout = 120 * time.Second
 	}
 	if c.APILogPath == "" {
 		c.APILogPath = "logs/api_calls.jsonl"
+	}
+	if c.MaxChatTurns == 0 && !c.DisableLimits {
+		c.MaxChatTurns = 100
+	}
+	if c.MaxPreTaskTurns == 0 && !c.DisableLimits {
+		c.MaxPreTaskTurns = 100
+	}
+	if c.MaxSubAgentTurns == 0 && !c.DisableLimits {
+		c.MaxSubAgentTurns = 100
 	}
 	return nil
 }

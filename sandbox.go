@@ -67,7 +67,7 @@ func DefaultSandboxConfig() SandboxConfig {
 }
 
 func normalizeSandboxConfig(cfg SandboxConfig) SandboxConfig {
-	if cfg.CommandTimeout <= 0 {
+	if cfg.CommandTimeout == 0 {
 		cfg.CommandTimeout = defaultCommandTimeout
 	}
 	return cfg
@@ -83,7 +83,11 @@ func (s *SandboxedExecutor) Run(command string) (ToolResult, ExecMeta) {
 	profile := s.generateProfile()
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), s.config.CommandTimeout)
+	ctx := context.Background()
+	cancel := func() {}
+	if s.config.CommandTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, s.config.CommandTimeout)
+	}
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sandbox-exec", "-p", profile, "sh", "-c", command)
@@ -241,7 +245,11 @@ func (p *PassthroughExecutor) Run(command string) (ToolResult, ExecMeta) {
 
 	start := time.Now()
 	cfg := normalizeSandboxConfig(p.config)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.CommandTimeout)
+	ctx := context.Background()
+	cancel := func() {}
+	if cfg.CommandTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, cfg.CommandTimeout)
+	}
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
