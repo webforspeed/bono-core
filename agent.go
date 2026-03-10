@@ -114,6 +114,17 @@ func NewAgent(config Config) (*Agent, error) {
 	a.registry.Register(RunShellTool(shellExec))
 	a.registry.Register(PythonRuntimeTool(shellExec))
 	a.registry.Register(CompactContextTool(a.compactMessages))
+
+	// Register enter_plan_mode tool with injected subagent runner.
+	// The closure captures the agent pointer and evaluates hooks at call time.
+	a.registry.Register(EnterPlanModeTool(func(ctx context.Context, projectDesc string) (*SubAgentResult, error) {
+		sa, ok := a.SubAgent("plan")
+		if !ok {
+			return nil, fmt.Errorf("plan subagent not found")
+		}
+		return a.RunSubAgent(ctx, sa, projectDesc)
+	}))
+
 	if config.CodeSearch != nil {
 		serviceCfg := *config.CodeSearch
 		serviceCfg.APIKey = config.APIKey
@@ -960,6 +971,7 @@ func (a *Agent) continueSubAgentLoop(
 
 // buildSubAgentHandoff constructs the handoff message injected into the main
 // conversation based on hook annotations.
+// ProgressiveDisclosure
 func (a *Agent) buildSubAgentHandoff(name string, result *SubAgentResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s agent summary]\n%s", name, result.Content)
@@ -970,7 +982,19 @@ func (a *Agent) buildSubAgentHandoff(name string, result *SubAgentResult) string
 
 	switch result.Meta["approval"] {
 	case "approved":
-		b.WriteString("\nImplement the plan above. Follow each step in order.")
+		b.WriteString(`
+Implement the plan above. Follow each step in order.
+
+After completing all tasks, provide a final implementation status with exactly these sections:
+
+### Completed Tasks
+A markdown table with columns: Task, Status (Done/Failed/Skipped).
+
+### Verification Results
+Bullet points for each verification performed (e.g., tests passing, build succeeding, code formatted).
+
+### Files Changed
+A list of files that were created or modified, with (NEW) or (MODIFIED) markers.`)
 	case "rejected":
 		b.WriteString("\nPlan was not approved for implementation.")
 	}
