@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	maxChatTurns       = 20 // allows for summary rounds that compress context
-	maxPreTaskTurns    = 10
+	maxChatTurns       = 100 // allows for summary rounds that compress context
+	maxPreTaskTurns    = 100
 	maxSubAgentTurns   = 100
 )
 
@@ -417,6 +417,11 @@ func (a *Agent) Messages() []Message {
 	return a.msgs
 }
 
+// APIKey returns the configured API key (may be empty for local-only usage).
+func (a *Agent) APIKey() string {
+	return a.config.APIKey
+}
+
 // ModelName returns the current model identifier.
 func (a *Agent) ModelName() string {
 	return a.config.Model
@@ -426,6 +431,16 @@ func (a *Agent) ModelName() string {
 func (a *Agent) SetModel(model string) {
 	a.config.Model = model
 	a.client.config.Model = model
+}
+
+// SetBaseURL updates the base URL for API calls.
+// Empty resets to DefaultBaseURL.
+func (a *Agent) SetBaseURL(baseURL string) {
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
+	a.config.BaseURL = baseURL
+	a.client.SetBaseURL(baseURL)
 }
 
 // SetReasoningEffort sets the reasoning effort level for subsequent API calls.

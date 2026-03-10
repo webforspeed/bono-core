@@ -121,13 +121,15 @@ type Usage struct {
 
 // Config holds configuration for creating a Provider.
 type Config struct {
-	APIKey      string        // Required: OpenRouter API key.
+	APIKey      string        // Required for remote providers. Can be empty for local providers like Ollama.
 	BaseURL     string        // Base URL (defaults to https://openrouter.ai/api/v1).
 	HTTPTimeout time.Duration // HTTP client timeout (defaults to 120s).
 	HTTPReferer string        // Optional HTTP-Referer header.
 	AppTitle    string        // Optional X-OpenRouter-Title header.
 	Categories  string        // Optional X-OpenRouter-Categories header (comma-separated).
 	HTTPClient  *http.Client  // If non-nil, used instead of creating a default client.
+	// SkipAuth disables the Authorization header. Use for local providers like Ollama.
+	SkipAuth bool
 }
 
 func (c *Config) defaults() {
@@ -460,7 +462,7 @@ type CompletionsClient struct {
 
 // NewCompletionsClient creates a new CompletionsClient.
 func NewCompletionsClient(cfg Config) (*CompletionsClient, error) {
-	if cfg.APIKey == "" {
+	if cfg.APIKey == "" && !cfg.SkipAuth {
 		return nil, ErrMissingAPIKey
 	}
 	cfg.defaults()

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -110,6 +111,7 @@ func NewClient(config Config) (*Client, error) {
 		AppTitle:    "webforspeed Bono",
 		Categories:  "cli-agent",
 		HTTPClient:  llmHTTPClient,
+		SkipAuth:    config.APIKey == "" || isLocalURL(config.BaseURL),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create llm provider: %w", err)
@@ -151,6 +153,48 @@ func (c *Client) LastModel() string {
 func (c *Client) ResetCost() {
 	c.totalCost = 0
 	c.lastUsage = nil
+}
+
+// SetBaseURL updates the base URL for API calls and recreates the provider.
+// This enables switching between different API endpoints (e.g., OpenRouter to local Ollama).
+func (c *Client) SetBaseURL(baseURL string) {
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
+	c.config.BaseURL = baseURL
+	
+	isLocal := isLocalURL(baseURL)
+	
+	// Recreate the provider with the new base URL
+	transport := &capturingTransport{base: http.DefaultTransport}
+	llmHTTPClient := &http.Client{
+		Timeout:   c.config.HTTPTimeout,
+		Transport: transport,
+	}
+	
+	provider, err := llm.NewCompletionsClient(llm.Config{
+		APIKey:      c.config.APIKey,
+		BaseURL:     baseURL,
+		HTTPTimeout: c.config.HTTPTimeout,
+		HTTPReferer: "https://webforspeed.com",
+		AppTitle:    "webforspeed Bono",
+		Categories:  "cli-agent",
+		HTTPClient:  llmHTTPClient,
+		SkipAuth:    isLocal, // Skip auth for local providers like Ollama
+	})
+	if err != nil {
+		// Log but don't fail - the old provider still works
+		log.Printf("warning: failed to recreate provider with new base URL: %v", err)
+		return
+	}
+	
+	c.provider = provider
+	c.transport = transport
+}
+
+// isLocalURL returns true if the URL points to a local service.
+func isLocalURL(baseURL string) bool {
+	return strings.Contains(baseURL, "localhost") || strings.Contains(baseURL, "127.0.0.1")
 }
 
 func (c *Client) applyMiddleware(messages []Message) []Message {

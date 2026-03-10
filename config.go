@@ -2,6 +2,8 @@ package core
 
 import "time"
 
+const DefaultBaseURL = "https://openrouter.ai/api/v1"
+
 // PreTaskConfig defines a sub-agent task that runs before the main agent.
 type PreTaskConfig struct {
 	Name         string // Display name (e.g., "exploring")
@@ -54,11 +56,8 @@ type Config struct {
 
 // Validate checks the configuration and sets defaults.
 func (c *Config) Validate() error {
-	if c.APIKey == "" {
-		return ErrMissingAPIKey
-	}
 	if c.BaseURL == "" {
-		c.BaseURL = "https://openrouter.ai/api/v1"
+		c.BaseURL = DefaultBaseURL
 	}
 	if c.Model == "" {
 		c.Model = "anthropic/claude-opus-4.5"
